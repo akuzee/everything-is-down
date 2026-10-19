@@ -41,13 +41,33 @@ console.log((same ? 'PASS' : 'FAIL') + '  JS decoder matches Python reference de
   + `  -- ${dec.length} polylines`);
 if (!same) failed++;
 
-// 3. the data string must be raw-embeddable (no escaping surprises)
-const bad = [...A.COAST_DATA].filter(c => {
+// 3. the data strings must be raw-embeddable (no escaping surprises)
+const safe = s => [...s].every(c => {
   const k = c.charCodeAt(0);
-  return k < 40 || k > 126 || k === 60 || k === 62 || k === 92 || k === 96;
+  return k >= 40 && k <= 126 && k !== 60 && k !== 62 && k !== 92 && k !== 96;
 });
-console.log((bad.length === 0 ? 'PASS' : 'FAIL') + '  data uses only the 83-char safe alphabet');
-if (bad.length) failed++;
+const dataOk = safe(A.COAST_DATA) && safe(A.STAR_DATA) &&
+  A.CONST_DATA.split('#').every(p => safe(p.slice(p.indexOf('!') + 1)) && !/['\\]/.test(p));
+console.log((dataOk ? 'PASS' : 'FAIL') + '  data uses only the 83-char safe alphabet');
+if (!dataOk) failed++;
+
+// 4. sky data round-trip vs the Python build's reference decode
+const sref = JSON.parse(readFileSync(here + 'sky_reference.json', 'utf8'));
+const st = A.decodeStars(A.STAR_DATA);
+let skySame = st.n === sref.stars.length;
+for (let i = 0; skySame && i < st.n; i++) {
+  const [raU, deU, mc] = sref.stars[i];
+  if (Math.abs(st.ra[i] - raU * sref.q) > 1e-9 || Math.abs(st.dec[i] - (deU * sref.q - 90)) > 1e-9 ||
+      Math.abs(st.mag[i] - ((mc >> 3) / 10 - 1.5)) > 1e-5 || st.col[i] !== (mc & 7)) skySame = false;
+}
+const figs = A.decodeFigures(A.CONST_DATA);
+let figSame = figs.length === sref.figures.length;
+for (let i = 0; figSame && i < figs.length; i++) {
+  if (figs[i].name !== sref.figures[i].n || JSON.stringify(figs[i].chains) !== JSON.stringify(sref.figures[i].c)) figSame = false;
+}
+console.log((skySame && figSame ? 'PASS' : 'FAIL') + '  JS sky decoders match Python reference decode exactly'
+  + `  -- ${st.n} stars, ${figs.length} figures`);
+if (!(skySame && figSame)) failed++;
 
 console.log(failed === 0 ? '\nALL TESTS PASSED' : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

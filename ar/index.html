@@ -11,6 +11,7 @@
     font:14px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
     -webkit-user-select:none; user-select:none; touch-action:none; }
   #cam { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; opacity:.55; }
+  #sky { position:fixed; inset:0; }
   #cv  { position:fixed; inset:0; touch-action:none; }
 
   .chip { background:rgba(8,12,18,.62); border:1px solid rgba(120,160,200,.28);
@@ -97,12 +98,14 @@
 
 <video id="cam" autoplay playsinline muted></video>
 <video id="faceVid" autoplay playsinline muted></video>
+<canvas id="sky"></canvas>
 <canvas id="cv"></canvas>
 
 <div id="chips">
   <div class="chip" id="chipView">view: –</div>
   <div class="chip" id="chipLoc">location: –</div>
   <div class="chip" id="chipHead">heading: –</div>
+  <div class="chip" id="chipSun">sun: –</div>
   <div class="chip hidden" id="chipFroze">FROZEN</div>
 </div>
 <div id="readout"><div id="roMain">–</div><div class="sub" id="roSub"></div></div>
@@ -123,8 +126,21 @@
     <input type="number" id="lensFov" min="30" max="140" step="1" inputmode="decimal">
     <span class="note-sm" style="flex:1">degrees across the long side of the camera image. A web page
       cannot read this from the lens, so it is estimated for your phone; Camera AR mode only.</span></div>
-  <div class="row"><label>Camera opacity</label>
+  <div class="row"><label>Background</label>
+    <select id="bgSel">
+      <option value="space">space: stars, land in grey</option>
+      <option value="camera">rear camera</option>
+      <option value="black">black</option>
+    </select></div>
+  <div class="row" id="opRow"><label>Camera opacity</label>
     <input type="range" id="opacity" min="0" max="100" step="1" value="55"><span class="val" id="opVal">55%</span></div>
+  <div class="row checks" id="skyRow"><label style="flex:0 0 108px">Sky</label>
+    <label><input type="checkbox" id="skyLines" checked>constellation lines</label>
+    <label><input type="checkbox" id="skyNames" checked>names</label></div>
+  <div class="row" id="clockRow"><label>Clock</label>
+    <input type="range" id="clock" min="-24" max="24" step="0.25" value="0"><span class="val" id="clockVal" style="flex:0 0 96px">now</span>
+    <button id="clockNow">now</button></div>
+  <div class="note-sm" id="clockInfo"></div>
   <div class="row"><label>Heading trim</label>
     <input type="range" id="trim" min="-180" max="180" step="0.5" value="0"><span class="val" id="trimVal">0&#176;</span>
     <button id="trimZero">reset</button></div>
@@ -154,8 +170,9 @@
   </div>
   <div class="modeCard" id="modeAr">
     <div class="mt">Camera AR</div>
-    <div class="md">The far side drawn over the rear camera's view. Much wider, but a web page cannot read
-      the lens's field of view, so it is estimated for your phone (adjustable under &#9881;).</div>
+    <div class="md">The far side drawn with the rear camera's own lens geometry, so it registers on the camera
+      image if you show it. Much wider, but a web page cannot read the lens's field of view, so it is
+      estimated for your phone (adjustable under &#9881;).</div>
   </div>
 
   <div id="winOpts">
@@ -176,20 +193,22 @@
       </select>
       <input type="number" id="eyeCm" step="1" min="10" max="150" value="40"><span style="font-size:12px;color:#b8ccd9">cm</span></div>
     <div class="status" id="eyeStatus"></div>
-    <div class="opt"><label>Background</label>
-      <select id="bgSrc">
-        <option value="camera">rear camera, zoomed to the window (approximate)</option>
-        <option value="black">black</option>
-      </select></div>
-    <div class="status" id="bgStatus"></div>
   </div>
   <div id="arOpts" class="hidden">
     <div class="status" id="lensStatus" style="margin-left:0"></div>
   </div>
+  <h2>Behind the far side</h2>
+  <div class="opt"><label>Background</label>
+    <select id="bgSrc">
+      <option value="space">space: the real sky, land in grey</option>
+      <option value="camera">rear camera</option>
+      <option value="black">black</option>
+    </select></div>
+  <div class="status" id="bgStatus"></div>
 
   <button id="startBtn">Start</button>
-  <p style="font-size:11px;color:#5f7a92;margin-top:14px;text-align:center">Needs motion &amp; orientation,
-     location and camera permission. Everything runs on the phone; nothing is sent anywhere.<br>
+  <p style="font-size:11px;color:#5f7a92;margin-top:14px;text-align:center">Needs motion &amp; orientation and
+     location permission (and the camera, if you choose it). Everything runs on the phone; nothing is sent anywhere.<br>
      No sensors (desktop)? Drag to look around. Scroll to zoom.</p>
  </div>
 </div>
@@ -408,6 +427,249 @@ var Antipode = (function () {
     {n:'Reykjavik', la: 64.1466, lo:-21.9426, th:142.2, x: 1.639, y: 2.418}
   ];
 
+  /* ------------------------------------------------------------ the sky ---
+     Stars: the Hipparcos catalogue to V = 6.0 (plus the few fainter stars a
+     figure needs), ICRS epoch 2026.0, sorted by RA. Per star three base-41
+     varints: delta RA and Dec+90 in 0.005-degree units, then magIdx*8+colour
+     (magIdx = (V+1.5)*10, colour = B-V class 0 blue .. 7 red). Figures are
+     Stellarium's modern sky culture: 'Name!chain~chain#Name!...', each chain
+     a run of star indices. Built by tools/build_sky.py. */
+  var STAR_DATA = 'T5WyPc/5Wr=bL4Tk,a:*f}FbP2^c2aN/]}F_F4b{,c6/ZZ*aF0_r9c,-gl;cAT8[o;_HBgWNc=.[s8c70]gIaM2U[AbN(gqEc/=gS-c34^T0a):aa7bJGfp+cH+WxDc--gc/bNTD[T1c=6Yr;c/4]oRcI-cYPZ*JaxMbR0fsAZ=0Zd=b@+X^M^EIzPb8(aT8bF6^V9c7(eZIaI=][Ec7E[xAaA8Ze9bC0YjEb.?[l?b9T5aj,[8-m9c90dm0c,2Zn+cBP]u+b*/bWBa:*[gE_F5]l6c3T@Y|Dc0RgT0c/.daG_P,eeOc;T9dV;_H8cgIc;Q]oR^,PU}C_03cdPc;2_pRbC+Uf8bF-cnAc8:d]2b.:Ti6cJ*Z^Eb05[b/c(V)eyJbMEgUDb=7fSJc+7^{=c7JTj0[=0XiQ^B-XpDZHT.Zp9cILYu(aE/aw5aL1d}Bb,2X|5bCTQ^]Hc0,c^.b-3fwCc;*ZxRb-+W|Lc-T0WyQa5(cqLcA.V[O_@)V[N_I.e}JbR-fZRa-I_jQc+2bX)bB/V[AaO5g[(_/1f]KcACZZLbKRWh@bPQ^_=b.7^oAc?.W}NbHAfY3aO8fy4c48aj5c:(eS*b)-cr?_5-fWP^.;czGbJ*Zt1bQT8c[(_:IelJbL1b]FcA(cdA]?DXd?cI+b^CbBFVo)c?)ffKZ62^ZKcA?de?b82X]1a)AV}9c,6er9a4(glGc7?UzEb@4Vk*cJJVxG_@-ea9a@/[l4YQG]g3a9*YXCcA3ee?c*6egA_H)[VFb.2XnMc=9f_8b=:hnLbN.XU+c6@[T/bJ9ak?bCBaX:bJ8bm8_*+_iOcI8[kPc0*hn.b=5[X*bN/hc@cA/_lDcA-_bHc/2Tu@b),_n)_E0etEa?/arEaQ1fm)]L,Zw4cA1]VNc(=dm9_G+cS0bH4]g,b.FWo5b.*gc9b6U8ZwPbK8^l:a:+f}0a7GV]6c0T.a}Dc38ip6bO,bj4bJ)UfNbJ(frFa:M]w0cB8]d+b9JfsGa)+f{0Z**d_L^B)fy=bN?bi2_DJcY:bB=csDcI6gmFcE,Z[L_5/]c?bRTCeT.c+T?YV0bRT8Y|-bF;XZGbB(ci/bF,dnGc=*_o?_:-^X:bBGf|Qc??e|-cJ6gT9c5PahPbPHb^Jb4)b^HbF;XY-]=(]k)bNT?VcFbBA]k4c-)XtEb-0bZ0bO+d{7aH9_dBbG)WX@^@+f]Nb/.fo2c3*]i6]N1i|J_3Neb;_64c{JZ/,bTPbQBdr4c.)bs0c84^}QcJ-gy@b4Acg5aP(f_*_7+d[*c34gc1bN*b[Da12c_K_L*gg0bN)^g*cBGiZFbNAY[7c=T0_mRb-(bnQa1;anHcE6]t8aQ?^m4c-=X_PaIGUj*_8=h^(cC=^eLbBT;_XEaOU)b|)a-9^o@c@6fo+aBT3cX1b1T=eX-aCT5bXNcK-ZT+c90d[(bO9]s,^+8]y4c?9XtCbB=VU)cBE[|KaD3fxM[2-gv7a18a}@b6+dy(cG;a}NbJ0]Y6bGT(eW?a7LXkG]GT?[X?aOCea5b8-_g(a:1Zm/cBT*hUJc5)WxE^E3ajN^+4ZW4c7T=Yb0bJBfo@c07]xIc.2fsQa1:dXEc;:[wAbN1az+cBT6au+c=+[xObC0ZY.c,Kdo(_(7aY2bG;n?c/4VyLVO4w3c@*ei1^,.fmMbK9YcLcA+he5b89[Z2bOBd}@aK9ap*cI.WSOc7QdjQaG,dx1bOQ_cK_M3c_BcI,]cIc-+Vh=c0)dtNaJ3Yb7c+)cyQbN,Yx6b82guQbN/bWNb/)WaNbH3^_)aL3hW?b,=fz8c38es4^I:[v5]MTF_uG_:5ZrKb68^T*bC.Wp.bL)WbQaGU)ga=bQ=arHc;5_Y(cA3d]/cA)cm=c5T,]fOa.FbcFc6NaSOc=*Ws-c=+ey7cGC]hC^3Df_)bE1esKc+M[q:c43c]4]D2dkGbC5bS.^A)_VBa),X[._ENXoHaO*g_C]74bZ?[*7Up*a1T-bj)c7*dXNcB,Wl4^2)gy+aG0dXHc/D[T.aDCXUNa91avPb(:cSEc82bj-a6Jel*c/3VdF[DT(b[IcA*Xr(bR(ge2b4/[]:bD3[[0^N0_V-c@6]q:bCRZXEb8AXdOb)5hXO_I,_T?^75fZLaG6aaIcJ7gfCcE,cp8bF)[y7cA)gd-bO2^rEb?4hb4^A3bu@bP)^](c(.^p7cI-ds?Z/HZ]-a,Jhz(b5;ht5b0T3be?aHIbi;YQTCd[Ga61fp)c-BXjIc75buAaH.cxF[LT5bT.c1N_rLbP)]iRcG4^i-cAPcaMaB5blPcJ1^f6c-(b]=b.-ZU.b4-_t/_D)[[BcA*ajAc00d|Ja:=eu-b8IUo,c(7Xv1cAT.UoAc04bq/bP+btJc50cpIb4GWlI]QA]{FbJ.ctQa83cs-^ILfm;c/*^zCbP*fkBcI*bV,bNT)cWIb48ec.b4+^c=dHFWU-c8T5epEbNPUk,^Q2^sQb:-]f:b@*[mMcB.^mGb?0fc:b.1ZxMb/7dnQc4)T{JcI+WnKc=TLeoQb0=_|JbF,VjKb@Neq4a28]^+a?+[y0c=G[b3cB=XT5_-Bci.bJFYq,aO/_r4_6(c]Ib5Jc_)c?5grL_ITKbr-c?3^s3cFO^}+b92Ta-b83jb;YP0[yEa/)dS6b)+^lRbBNcv?c7)ai7cG3Ym(cANZc5aGT+]tFc0T-dY)c0/cw1bD-_d5aC.]tLbL/_jEc7)ZX;c/?_nHc7+aZHbP8daQc?)Ym6c6@WgGb51gjHc8-^a;c/9hd2b06ZWHc5Cbb.bGK^sD^P,]a,a7*Um)^Q2XmKa-=]lOc5AW[Pb.)X|C_*(b{)b4F^nDc-8[}*cGFYXJcI.di,aA.bVDc+3Wp1b@?fV-cA*f^Lc25_VK]J0cS/a,Id},bB*]U9_--el/_(8ajGc36gtNc=/_z7_7(aZHb-0[i:_J9VX3c/,Up0a5UIie6c8.cZF_LIay1c83bqOc;6V]Eb5+YwQ_L2au1b4HZdHb=,b|(]R5Yg/cA4TtMa:.d^Q_/,Yh(bK)fcF^?9[[Aa9AaiBbF)cy*a*1e_?cA6gz+c@TQYX@c?)[TNcA.d_)b6Ee}8^DTNay:c80gT-bP6_qOcG1]oC^E)awPbP1^^Ob,KciKaO.ZxDb?MZyNc8(bYMc50Xz9[D@^d:b,+df=a-*VV=aH5cyEaD0b^-_P;ZqHc-+dm0cB)^f(bN*_t;a,.eb7bJT,aS*cB/e{8b,6]uDc/BZcRc@5bx,c=*]j:c78UY4bE)_ZRZR-ZyJ^R(_]3bM8]u@b84XWNc8KVmCaPL]uQb5DfV)[F;db=]?5br1bF-fgDa9GiY:bK6a_6bR0]}5b1Pgb?c;3TaGc,IdlKZ*T/en*_(;eTL^;.cYMc,T2aWPcEJdf2a):bU2_:+ie:c=4hkPa?/Z^D^90b{Rc22Xf6c?(_i?bJ.Vy9c13^l0aQIeg)cATLb[Fa?@cc+bNAfiIc6*]p(a6/Ti?bH3et?aK;ck)cIT*XT,c88ddEcE*d{JbF+V^KbI1Z_Ac=5V_.b/+[T1aC)^m=bR5eq(b,*[i=c-+ctRaD;ep8aO4_W;a80[WN^5+Zw6c)9b{+cA+gj3a,+XlQ_97cYH_M(h|1b?Q_XQc/-b]/b41ZyHbJ*dx8aG@ek8c?8b}FbJFbZ0b)Ael,b4T5boDbJ)eo2Y?1cqCc31ge+b*/_u+^+QUgKcGQZgJcAR_x=^/;YgRc0A]cRc/*ek7aG6crPc+Eeo0bN1fw9_07em@a-*V])a/2][0bO8Xo*c4(fr2_J+TdLc/)fa?aO=aU5aO1ef._E*XUPcF(^W3a-(efFc3/_g1cA-UuFc3)a^-_*T@ef4bE3iv1bR,eZFb6/Wr3c/)_vIc3+c{(c;4]lN^3LdgEc4+f^0cF/[X=_5Kbn7c=TM]d9bR9[nLb+2eg,_66^tNc7,^sR_84XzAa)TF]vRcAE^TAcIT)_UPbJQ^VCbECdZ6bFT2g]8b*,Yz1aF,bU-c++csGaG9fwAc1.Y_(a),ee-[J8]k9]N8]gNbOKU}O^;-ck@^71^l6b,)dTNbN6bm?bF,blE^.+^pBc(3bp0c+*bn7_5(dtH^9+XV(c/?_f@b4/bmN^A,bnKc3,eXMc+*gqLc4)g^)a8-]_(_F)_j1cA0bkM^Q/Z[Oc=;Z{B_0=TxN]?4blC[C1ZxAb,6ZWMbJ9aT8aN+bi3b=5Y]?_6([]*c9+^s.cBBd{=c=)bl7]R)blIaO+hXHb=3Ye:_2+giE_F)co:aO+g]Jc4BeU8c.4bsKb-*hZR_PTNcuDc3-_hOc+M^UNbFBat@cG;XX3cB,ei6c7)YlCaN+ZtR_O(fmLc4?ciA[:0^cC_K,Xz/c-T+]_(cFNee@b=Ccy.bF/es5b65bdEbO5f}-aL6g[Fa?@dh0[B1]W-[PMVe?a*/^U6cA,c|C^IE][Fc(?ZwN_OPZV4c;(aZQ]B/axJc=,VaK_M=Vg+aL4^j;b33_yKc+T*^pGb@E_f2^AG_c@b42_q(bH3_TKb@2blCbI)]ZDbR,fsBaI4bbH_DJbb8c@7Zf.bO?gy*cBDeqD_6)b}Eb+=cY=b.T1atCcBId]BbH*edI^I:aa8c;/bTFbJ/[t,bEOiaFaQ+jSBc56]y2bB?]p(c/*bx0b@)Xr/a@.cqMc0:_cRc-5[_Hc45]yF^JU+_nEb6;_v1a8+XpG^E=]i(aC)V_3]=1_yMb,2VaEbJ,dj?a1)eh/_*7]uA_C9_t8_6CWlN_7@VoH_D4fV@b,1gUHc*4fm3c/.bY9a@+]{;cA:VZ;c;3Yq.]I-TYHc.4eq7_P)[]RcJ.b_4bOT)ep/bG+Xg+b80b].bF1ba2b31al2^30ad=bO4et9bF*dpRcA.b|:aK*cvDaC2aiEb5+[^6b=)_fPc7(ggJb7*]uRc:4TS+c5C^q@cB-e]Ma54f{4bC+ffEc=*VYLb00adFc,8bZBcC2bt*b=:auB^;0ZsCc88aqMbO.b[7cE/^^Ib,1_w/aO1Yp,^N+au-a6;ct?c+/csFc59a|OcG.Vf4cB7bcJ_/*bc5b5,aw=_6Hcg8b83bf5_7)al1_I5agKa1Aib4bB4bg0bF1aTGc;6V_*c/5b_=c,2ipMbE1agPc=*aoLaK-^xIbF*amN^;*a}B]N*[e,cB(am:]C1a^EaH6]Y7bMT+inAbJ/al5bO?ao)a6+abRb?*alAbG)Yh,cA0XcHaNT3^qKaD0fX(c4G^b7c2T+ZYK_L)hbLc=*V]Ac77ah:a.+]z.c*,WY?]8/_d0c++]o3b1(]rNb2@cY4c;T,ZUQ^;._zB_75apAWL=^aF^@,gc=c;7dn5_:+Vb0c(A^vOb3;^eQb-Fa[*_7(an2c4)]S2^E,bYPc;J]^NaG2_o9b?+am,aP.amFa.+[}RbJGfSQb(*fUMb?-aY@bE+ZuCbR8[d+_;.XrK_AQcWCc++egDc+@d^IcG3Y_LaI1bg(_5EWqJb8.dxAb40U_)bE-ZTQc02eoKc;3]p-cHC]q@c3+[hRbF3VmEb5,aT8b?I[Z0c0@^b.^HEaW-b54a{9cJAdiEcIT*[q9bI=fgNb5E[t7c5,^T6c63hs;cF;cg7bR-cm(c4E_jR]2*dYOaD7[tPaK?_t:_67Wc2bO4eiJbR*_d7^.1a{PaP-YkIc4Hg^KbKAae@a3-dV+a:/cT,cG)dtIc,-^U9_AB_S3b:LgmE_62^}P^.DaUIb-)_nRb9*^t4cD+_z@_P0f_BbF+[r7c/+Tu=bK/[sPc/Dai8c36e}Pc,4aaQ_**^VKbEHcoK[66fW1_@-asGbK@bkMc79bq1c3;^z8_M7yHc71[t.c-4d[Ma?G]hQbA-][Ma6:de0c?*id,b)T5[b1a?)]x)a4=^u@cB.dzK[M2ZlMaK3Y{*cA-dm8^34U].b8*Z}Lc/(^[=cB*Wx3b@7b_6_Q8fyM^MAZv*bNEYhP_L/ak/a-=Wv/b)8Zm:c/1[TO]5*VxFa/JfrFb,:f}9cJ)dn/]/0ewGaH,^Y5aOK]],cH*azRaB-VYIb24bXDb5*^W1[:*_r=b5*b_Oc42bm8bF3]pIc3;^Z4aQ?]p5_51_xRb?;al,a6+cTIc=T/ea,c-H^eNc?+]a1c(8an4b1+^w+c@E]a-_H,hiHb;?]}=cA/[tR]77]YO_@+_TR_L.d_Ia69Ur4a:NYf@c/+]s)V62_b/bKKZiBaO(cm=aHKaU6bF4cu9cF=eZ8V1QYkJa9.]yD]Q,]W+bJCcpK_M*hf:c3*duIbKH[kBcG/crEb;0dhCa0)_SFb6-bbKaK,Wq/b@*Zg?cE1]XI_5=]]Qb3*csFaP3dm:bG/gYEc)+[Z9a-Qc]3c+8^p(c*1_r.c2*^p/a,)Zt/aR)dpQb+OiX?aQ7_X5aG(dm/bGA]qRcE-X};c1+fkHb,*]U,b32^q2c*4]tP_*CatLaI*[q1bN(^f6]7(^mFb(0ceQc;)dY8aL,^{)a=6]hDc(._h(Y*T*[cQc57cWAY2)VqEb(CcuJc=)_V-_O4Xw4c=+ca8c,)awDb=Bbb)a=(cv0b).am;bF5at-c93[]I[=)Y_9bNT2bqGbF.^a1c79^lGa21^zIc24XW7bI(g[EbD6ajQc=9_f*_-*do3cI7[]2bF-Yi(^E)_W+bE:X^(cB7TnDb0*]w9_O+^pAZ93azH_=)as2bF@^j3b3*ck*a.)[m,[*.YX.bK/VUGb8.YjCc/=^l8b;(az;c+-V_0^:6aeKbM0^jMcB3_Y8b4AT{5c9,_w5_?2]}Gc*)]}Ia4-_y=]A,_zRbO*YtEc7(^UIaH)^UHaO-^UCaG(^X9_O+^S0[0)bl4b=2^X6b-F^l/Y2:fZ@c1)]}:c*7_v6_*0as.bG)aSMcJ+bz7c3,TX@c.?b].[J-Za+b66_mKc;I]zQcD(cbIb@,Xx;c3)^e6^6/]wLa67_[-_H.cZ@cF3^_DcF.YoK[0-bu6b+-YvMbBT-^h@Y2,^l?a=5^sFc=2apFa4T.[TNc;)YlPb41gj=c(*^y1aC?]yNcGA[i=c+T6[T?^)8Uy7_7T7eo+bF-Yx:b+AXYHb8*fdIc=,^wGc@1am0cE-_w;c7-[{H]K5afGc++WnP^B0av?bG6acLb3*]kMZ)4_h?b5G^]*cH@bnMaC0dd._L:a[Ha?+[}7bJ4WT*_L+UsFaN(Z|Rc;/_y/c71_]CcJ+T^ObF2aeKbJ)^{OcI;WiLb0,YgA],(cT;bR,dY(a36[].^;*]v6b;/dd(^MI]nPc=3Vz1c@*ae.bN(bUQcG+^{+a:.Y];bRFYq.a=2b}G_PQV[4a16bWP_B9]aBc()^vIcJ-Wg3b5(fbIaG*X|,bK+bU7c:)fw/b,)chEc=2_m.W*8Y_QaK(^Y?cAOZ}CcA-Y|QbH+]SP^0+_w9cE:aV1cANYiO_?AbuDa5=^zRc=3Xh1c72^tHb,+a]?c/2]l8aH+Xn/^M3eoAcA0eU3YE)fYL^31dX@[13eZ,_=.^c)_MPWn0c,0eeFc+7YpCbK@ejMcJ.]g5a=E_x+^RT+ZlKaL2bU+aOAbW3_Q2bh=_1-]z4b,.Yy,c*8Xc.c?7_c;c/)[sCa@(_[5bR,dvFc?=YhJc3(]i+c?JZYMc3+UwNc+([{/a-;Z|4bF*d_Hb5+^[Ab;8[WDc0-VaLaL(YnEc2AY_4aG+ah+_?.[f@b:1Xq8bFT*Uj0aO3[TCbF(_S1c+Gbc3cC*[|NbR0bgJc,+Z}Pc-1fr?b82Xz/bL,Tv7aR*WYNa,6ZhAc/KUz+aL7bn.c7,eiDc44]{+aN,ae6_G,bUAc3*anGa=6cm?c9DgjCbCT3^^Jc7Gaw7c=/^YHc23a};b.)]|9^N)bdK]@5[a.cB(acBc:0[iNcI,c[O_:*anJb3,^X*cE+^o?bP.fwGbC+]V,aG(a[2b=;[rQcD8aYOaI.YjC_D*YT=cF?Y[QbJ-_y?b?*Y_4c=-_aOc.@[r(b)3gT,aM7[bDbEI]m1bC(g|/a5/[[Qc2JfrN_@+Yn2c3*]tMb36^cEaE,ag=c04ZX7[J6Yo;bET(]aBbF9fUIb6:YrP^EBa[6cF*UdDc(+[l:YL3WS*bO*bdM[IR_^:_A1Zp2c()WfRTK+YbRbR0]bJb1*VjRc3Lel;aE;^m9c?2Uf+bB4W})c3MfeBbG4^jEc;(a^PdN0foRb14Vv,c80^s=b0*^pFbK,_U1bJI^XKaN2Yw,_G=cbJc.+[nLc7*Yx-c*0]xG^6/bWC^PDV{Fb09WrQb63e^IcB/]iMcBHZeAc:(fnHcA@Yj)c6-Wk1bP+]]Bb1?aV6b-*]s1bC)ZzJ_5.Vr9c+9__GcA*Y].b8)^S8bO,cl6c41YyJc*5_lK_HMae+bR*^l+aN1Ye4bCPYv:bN=WeC_6,Z}(_H/cTGb4+^v7c3*_yIcB-YbCbMT0[i(c.0d_AbD*^VCbF-[f,^E-]X*cBAYaBc*=fh8c;*gSPcA*ap)YE*Xl5]/*Yx3b8-[k*_DBcY9c34W|Kb(*de/c00dgEb4A]T)a:+dt4a:;ZV8c/,a^7cE4TVKbO@h}=c0+h^)cB@_y4a,.^t:c3T)]n4b1Aav,b,LeS1aLF_Z1c;7bqC]-*a_A_LCZS;b+6cY6bC;[r:1/a]P]:-YzPc?/ZT*bM;Wh7c8,[{Mb44iZ-b@)ftRa?7_rOc:-]iHc+-dyCb.,fiOb8*[}Eb4)WmQbC@WW,c((_p1a:*Y[(b45]o-b**ej)b02^}J_L8VbN]1)fbIbG.^kBc,J[z.b=8^fQc+=cm+c00Yw:]I(ao+c:)Wb;_D+XYEaQ)Wq-[H?[pFc8)Y{7c+*aa;c09dpLaL,^o8c5*Yn8aL,gsDaNCU^Mb;-ba/b4/Ye4c=7bj.c0QcsF^(*_qOc,5fu)b74[g/c,3[a7a40gz+aN@Zw*^G*]_4_+*Zx4e)2^l@b?3a_4a.=[_=c35brKc-8[aKa/0Z}-b39]T?aK)[pL_@.Wz7aE1_yBc;-e[Ic;*T^CbF:e^McA+cr5cA6fp(_:6ZtNbH+eV(a?RYoDaN1Zq*bM)Z^GXM9_XBcIT+UnHb14hx?_M1an;c1/]r)c;AWm4b*4Zr)bM5hX:c0:ZdI]P3^T-b2:ajLc7.avDcJ(bm.b0/aq7cC:^[6aF-ZxI[K4Vp6bE*_uCcF3c[,c?.aS:b).[wI^P/Wv.a@+Xj5bQ,Xp?b-*^V*c()bY7^M2V|0aOT1be:cE:_uLc8Ecv0bJB]cPb=@Xw@c2-Wj?cI0ZxHc*(csPcB@_m;c/EamHbJ*Zl3Y@7Ub.c-*Ub-^;.X}Ba4M[tLcE0ZqQc*C^[7aC-ZfPbJBWy6b)9caA_E4bz)c,)^pAb?5ddLaD*[].c30^oC^Q9Zn;c:+Xy;b41YcIc:(blHc?.XXP_IF]d.c8-XbCa?0anMb*)[S9cJ(evObL/Xe4_EJ^^(c8,Zl=_?(]j=cB,_V0bB2aY-c/-W|Aa-+bp9c8+XX=c*+Zj9^H*Zi-c(-XtQc:=WgPcI(ZU6b;7_oQc8+]g8cA.eb;bH+fuPb0+cT,c16[x(bF)XXMc(6YY,c2*Ze)a2*Z{4a;2Yc?aF)Un@^L7Ya+[7?ez5cBBdl;c=*Xh;c:)apG^(2YbLa-4em5aG)YTIb,,YbJaN*Zu1a=)Zs4_?0Zk6b8D_T8cA-[t*c,8_kNc?8bb2]L4WhMbH6WiQb=6Zi=cD+[}RbR-ZnHcC2eVEc,KbXIb)-dV6b()^rNcE0[g3a?2]}Lc5@f_Fc30Yz4b;AZe2bC(bq1aK+YxQb;FZ]+ZL*dk9b1?b}Mc5-[u(b,,YzMb83aVQb?(ey-c91]UQc56Zr(c23Ta0bK(_v3aK,cSC^;/^SMcICWo.b(9Yo=c:)el+_P3bWLc=+Z|9c*/[lNbO(_q;[CGZ}?cE)b^Db..]bEc5.Z]KbF+_jNb-._tA_;MYzEc:(eg+c+3Y|Bc2)YVGb;)ci+_/-XkK]?-^hHc()cU0aP)]hEc1+]v0c?;aXB_M)cT0aK*Z|Ga@,en5b6+Wg0cADW]EcB1ZT(a11gx(bR2ij)aENas7bJ7]oFc?(^{7b-T4Zt=c4*_W+bO.[e5bR6am1b42[}/a:+YdIb=2[U3_B2_W;c3*Zz?aQ6Zi3c7)ciAY+Ece*b84ZbDa,6WgIaD5bz1_+/[}5c+Ae[4c0+_eCc@-[cPc*+WyLc+*fc(cAC^[RaQ,Yk:_HEeiQc==WzQc.(Zq4a-4cy(bR2Yd(c2-Zj3^68cvHaA._b=VJ1YY.a4)av2aM4YYRc*,YY8c30Y]GcE5[d-cA)d_+c9/[yAaL-jU?b*Cbg5cB3efKbR*]l:^E)YX*b;8_XGc;4UUM^E*aaJc92ae6bLOZl=bR/XbEaJ+fq9a@2Yf/bM.cXO_23Zb:a+0Xw6b(-Z^J^B5er*b4+btKb9*Yf-c46bn*^+.YZPc:(ZtEbMMYZK^-*cTHX86Yo8b@:[|RaH-]yRbK,az5aD+YZRc:,_}Ab4=dZ)b)(gi5cAE[T/c:3YX/aN,cq)b*)XYEb+?]^AbH/Zn?_@5XW7a1LZs?b7-V}MbR-VjQc5(XX:c2)XZK^P(Yj,c;+ZsI]?6YsDc)-Uw-c3([oRb1C]n1c(3WqDcATB^zDaN)[ZHbR*]U1b/AXy,^3*YlHaI+[{Cc-1W]Lc*/YV:_G0^U@c55Wv(_O(YdDbB4W}7_-2byBaGLYg)bEDed*bK1Vy=c(J_t2c?/bV)b=KViJc0AWeB]I,Z}9_1-XjLb;*am*c87XgMaN:ZW*a60VjNbP*X_Gb);WwK_G-^|Nb8CVh5c31Xb;cD,Z{5b(:YT6b.0Vi=b2.^_+aD.[j3_P9hiCbC/VXQa4@at;c(+W^Nc:-brOcA6^k1a2)__Lc+-fs+c50ap4cE.Y_.c=J^}9_EBXu?bE8YwEc8AcSCaC+X{NZ1LYvDb:@Wq2cJ,iYHb=6WdQbK)a_)aOT=be:cK;Xb1aLI[^Ib54Zv;[;3b_4b70Uk5_5Eew3a5/^c;_D=VeRa/)[f._?/Wz@c*8[tIc*+XV-Y2)WT:c,*XgJb+.XS0b+9fo/cB=bs:c.2]UGbHDW{Dc2-]YRa1,X}I_E,Xm6a.-]u,bBAXY=c63av,a/7X[6cD7gx*b88c]FbN2[w(aK0YfOa4,Ws/bL)XWKaN4ff8cA/YdMaN,Xz0_D0YhOc71X^:c:T*V]-b,T@_uL]OTCfuCbOAYi,c()UyQb(,][7c@/TkK_()Yc0_ANgXPc/5hrAbJ6U[/b41U[1bN+b{JaQ7bZ1c7,flGc?-bl0c;,Ti*_:+hb1cJDVv1cE0Yd*b+([b+bQ)YtJa:D[n2c/1T|Rb4@VnHYI(W{=a48Zl=c?(dwF_;+]v1cC)WiIc;@ay:c=@fTDbGCTV5c/6^^HbP9Z|+c+*Xn8cD-ZwHb9AWkGb+,^|3c0+^]R^A,Uw8^;.VSOcA(Xq8bE+[{0cF(_mPb(E^]AbO(cT,c(4][NbJ*a[Ic)EUd,bF8We*aP=YjHc*Iae6c=AXS1b3*XgCc29XdMaF7X[)cD(gr5cACf{0]=3Yy.c(T2bl=c,)[d?b=,ax4b9BWd;c-IbXHb93d];cANYV?c:,__1cA7^g@c3GggKbG.Wt8aL)dTFc3DVu(b3,Vv*a9.]t,c+)Zj+c?:_i5c?)Wo8c2T?_x-c;3V]9bJ8Xm5^R)_dM^Q2ZlQb,Acn)cI*fU?c/=_W5_M8UbFb,*[S=aR,gg0bQ-e}.cA-Wc6bE7ZZLaC5We1b++]]/aL,YiJ^M-gcLa),We9bM)WeN]Q)XzCb,5XbBc1*Vm?_5(XY;^:=eYCb8+Wy7c:/XV1a.-TaLbE=[v2aC3Xa?b-8W}8bE+We(bE-WdPa4Qa[NbP)_WC_5+b^Ia-8Yt.^.,WtRaN(]wHa(NXnR_*6axB^E)W[.YE+_z0bN-Y_Lc*T4T^0c8-X]:^A)^h)c/9]VP_:.X^+b?2V|,_G(cX5^M+_h6]E1aY,c=7^hJb4,X[Nc-T7_e?_6T-^a1b47Xz6bF/Xb(a?+Yv-b01Z[4cA8XqGcD0ZeM^N*XZ*aN)Ut1b6T1]x)bG)VwNbM9dz5b(3dqOcJ*eW+cJ;cV1cI(cl:c,+W|-c:0YW-c8GgV3c,@VjCc3)XU1b5=cc0bBRVi0^60WYOc-([k*c02_f)],.ZeRa@/cT2b05aVHbC=WfLa,1di-c?+[r?cB+ge/bR)j.b?1eXCc/.cnAb?*Vp,a=6ajJb-8al)c,9W{+cAFaWM_75[u6c5.XVCb-8ef7])3VpLb./cl/b0EXuJ_KEdpL^K/VgDc8;UjRcC2XrKbM+ck6c;9Wi:b+3^oFbRBUv.^J-gsPa22_lDcA(bn5bFT+eb*]R;fYLc+0XW3^3T0UUM_K5ehIbH4UaPa,9_aMaKEd_Ba)T=_}+b,5Xk/Z8(c]FbB*ZnNa*9gp2b)8]q-bN,bxOc@+cs4c?)ewI_I2[jCc+/]]Hc70bbAb04]p.bJ9ZVObOAgq?a7Dg^Ma/*Vq8]A.Xd.aH2Va*^H6XYJc2?[cGc/DXj3bM?Vo0bI5UeQY3=XV,c;3dwMb39XgFc:0WVQb8*gSEb/)^}4^A*Xl/b+FY]Cc@5ahObC)cvRcH:YWNaC0Y^?_R+fgKb9*hdMc=9Vx6_=(fX@a61Xg,b*7]p7bF)]|)b05YSLb8.VoNZ3*[|Pc70UjQb@/TuFb4*Tv;c;+e_8cEGWo(b49cz@c=5Wl?c5/dV@^7N[vJc83]_Ca9M]l9a9AV_Ca9-cuK]-AZn7a33fgCc8.WW1bO)Xq0c)5WYFZK6X]9c/RZ_7a1T,Vd4cI)TVQb6EbvH_MO^W+c(*VbLc4T*WcDaNRUZIbJ3[U)a15]pJYR2]}9bAL_u0bA)_pRc/)UtEc;0eX;bB.Va2cA;^d?_R+[]Kc0)YfE_MKZk5bK1WlHbF7Vt6cC([x)cA8XyD^))cr0cA*Yz;c+AVzK]58YzAc=(cy3bC(g[D^1)YgKcB*US@bK.bg+_;3aU.aK)_x9b))^l2_I9XxHb8)[e8c,Bex,]2-]W,cB6[[)aK4Z}=c;7WxRaN/TV0aN5Wn(aF,dTA_L3Vp,^Q*hSE_K+^S/bR6eyP_H,ha2c50df4a9Gc|GbAT5cf)c(-Ww3_71ZqDc/*ap1c0*idH_;,Yy*bR*Wb1b?(_j7aK6YeQcIEXl6bJ9di5b5-_^Ga2T+VeM_H.gr/cJ=^l:^F@]S-aN=Vv/b59VyGc7-_y3]L/ZyQa47cfCcB3WXFcD2dfRbR3Zx7aA)g{Ic/Nha;b(Hc_2bO/Wa.bN*ad9bDAZeAa7T3V_,^3Hbk([N8_iIc92Tl?bB)aWDc0)^zHc,-XdGbM)fiGb)GU|C[DTLeZ?aRT*Y_DcBCX^PaOOXX+c/3V]Qc(+fs)^83Vo.c8.X[FbR0[{C_*2XYQa)2bn)b53fXI_H=]s=aO5buN^FT/_f,cC.Wn@c::Zn@aC-Xb-c*FWrPc+([g4aDT*eo*b4N_tCcA0Ys(c85W[L]J:fk-cIAdm4aQEaZHb40hd@cABYfQb-Oc]Dc/5fh.bK:_p3a2CzRbF6ciHbAT1Vj4c=T(bb,c*TMZvAc,5fWOc-D]Y4_PT4XUQb(T0[p9c(1aqK]J-cyQ_IA_yJ_E*^p1_H?aX8XF9UxRb84Wk4a=FUjRc3H]Z?b6)]r(c;A]]I^+*Xs@cJ8]qQc(6dY;cBFVuKc*T2_^@c7GWn,b5,WkAc4*Uv2aP4Ud7]8)Xz1cBT0XqA^AQXlGc(Nc[(bF7biFc@/ac(bD)bi2]C(brJc8;VeM]G(dv7]J/bgHc5=]sEb5=ggDc,-Z^CbG9XsIcE0WT5c5AVS@c+:eh,cI1WYBa+-bT(a75bUKYQ7XT6c1JWTD_G/gy7c=T7dn.c-/XsMa9(do;].JUsFaF/cs:c=9^].c;*YZCb5Kcr?bJ(giMa?5TyO^KGVs4c=6_sNc)B]xBc(1crNa.0[qO^=OWZ6c(8ZS;_;5VwMa/)Uy?cE*doQcF?Vr=^8(dV+_2T1VV(b:HZZ5c((^dEb,-ZUHbN,is(bG@dbOc32^nPaN*UXLa-6fd,a7;]VHbN*T}MaE)ijIb66Wb(aADckRc=-Xc0c2+Vd-]81adRbD:Xe7cA4VrMcF)_v9^6.XWHaK6dj1a.7cxGbNCZy0b)Q_jQb(4_s1c+*hr7aC,fi=b-+YS)bL4TcA_+.Vx2_NPVn;b(2]^6c-LZg5aE,W|J^80Vr?bH-]WHaEBVyHc:E[qGaC/cj(a0)Vp5a24Vr-cK-fVLbK*d[Qc51WVJ_:T+U|;bETRgwOc0+T[LcE,gjBb)7VTAa4@Vp/b?*Yv:bN4VTO[0+bw:bG*gzRaL6__/c7,bh.aO.ViBa+(e[9b-1fj*c3/VUCc+5VW)a4T.grMcC2TX=bJDTX._G,ccFb=?VT5b4/ae3bJ(a|/bJ,VU@b,6WvQ[5,VTQa=([oEb?-V|/aOT7VlHcF0Y{:c;@^h;cCG_|;b4/VoDc;3[u*]--]jQcA3YoNbN:]oCc4Q^bPcB-fg)c/3ft8bRT7VyKb5RctP^;0hSJcA)VqP^;([aJb.,f[4b).Ua*cE)^gDbJ5dwGa-8]UOc.2Vc:cCAct*c/8ViLcA9boI_6,^uCc?*cq;aK6_g0cBMY_Ma)=Wp8c=UAYq:c-4dj2aJ+[t2cC)dS,cJ3[jI_*3Xi6c31Xq*_A*]T5cB*eX,bK8_XEa91_fJaH-dd4aPT0^eOa2)ff+Z:BbW;_@T-]cNbJ:^r)cB.gU2YARXT:c,;Yg7b=-_lK_Q8ZgNaAJZgOc+GV_?a)6U_3bN,^{AbJ;Xo)aOTAVbMaP)Vq6^F0Zd*b=,bo5c+CdT.c08dwKcB)eS,[O4Yx-c3U.Z}F_HT+Wx?b?+VjJ_R0VV(b,BXfBc96Vn0c*/Wd7c0-^qFb=6_p6c7,bY.[*.ak4]8T/bgFa+Ka_Qb8R^_1_I*em7cAH^{Lb1T:co;]O@^z+cA2d^4a6/VT(cG,[{Q^+U)W]1^@/_f:^QU*dy.aK8V|*c3,YeCaL/U}/aO([h9aQF_|8^K.^xObB/UWAbF?]f*a:6[mI^R-aUJc8CYf,b0,Y[NcB*ap4bP-VVQb.4fc;c/JVfOb,2WdGc5;]]Ic?Q_TQaCJXnMaOBddOb4(gU8c5GZuFc3+ak1c0I^c7a:0ayLbJ*dwDc?T+g|1^?:Vo+b(+VnGaQAZ]4aA+Us8cA(f|RbHAXyJc((]tLcB-ZS8b)-YzC]NIXy*b?O_UQc5-YuOcH4aqQc:+W^5_P1Wx6bJ/f]3bR/XUPc)FV[C](/XTDb5/g|/b04cS@c4,Vg1c22Yr3c/-]k1a-5^n(_:+Vf+b(4TpKbP8XT-bK4Up/cA8Vc:aO3dyLbO._pGb12]XDbHT)U{(aJNYl@a-BW_IcC,b^/b8.Vb.aC/ctMb76XlKbF4chNc-1Yw=b1NgoCb9T1Y_CcJ+V_0aJT?[j?a1D_q5a68Ut?^(/X_.b3._hN^N1ee,^3?Xy=aB+VfB_*=fb8b9=VwBbDH_q2b4+bWE_J5Ut,a2=aeGc=.Zj@b)6ag,Z*JVWM_5)cx9c-4Uc;aLDV^9c,5^zD^)8^V(bR-XbE_MFZTCc?0U{Qa=7V{*bNOYpC_6T.fVQZDT+ZoBb86VZ6c=+_r1bRHZb-cB)al6bG7fg-c7*[p7b,U(V_8bMHWS5b=EVU/bOCcoKcA8Te;a?8_XMb=R]h*bI.[d-b3)_i4a.Qc}LbR@dw(b-DUh?c;=VZ/_7KXp)aQHb^Gc=*VZOa-8UlGb4.TmIaL2VgCcC4_sD_*,hx/c7T6Uy=c@CVSL_(T.Ts8b15WpO_G0Wz=b4.WpC[(+Zt8^JBXfKc,(XuObFQ^{3cA;_e6c-+[SF[PT+ifCcK+ZyNbFGWhA^H3bu1c07bY1bR*h{DaQ0V[Qc=T4YV-c2(_{+c=IX^Rb9T/[]6c7/Vr:[8(hU;c/7fi2]8:[n;[(2ahGaO.dk7c03bkLaC0co4aKT1cY/c,(fT=c8+Un?_,QT_._--VVK^P4^n0c=/hoEbF1WY)aMT(ejRb:,^nJ^A6[UMc@/bxNbJ)_W/aK3[UEb,0avLa1/fm4bK+]VMb(@Vj8^,HWS)cB0UpEaP,UlKc/7bu,a78VwFb=EZsMc/3Yi3b40YV1c36ew@a96bv6b,Pfh(c9/]b8c;0Yj8c+Bdc7aKFb|*a@.Wm*a4,V[1W=5YuNbN,cUP_:*byNaGCVq3bC-fbKc0AWs(^@9YUBbFEbu:b4EblDbH5bZQc+/[s;[C*V}4c8+Xs:cJ(foPb?/g{BaM1Zy:c)NbnMbF0Vz9Y1DVo.bI5VY2cF.[u)_8.USPcA6UX.^6/]U9c-T+hS;^@-]Z:bR+cp0bB,dnJ_0+]lPbFHZzO[58Xe,c6*hTBaD-be9a56ayEaK)baIcBIXvPaP5X|@c3P^SBc;2as8c02UhJ[0DW{2^A(ZhDb?L^{+c0:[k(cF8ZVDcB+b[IbJ.]t)a2JX{R_PTF]Y@b..X[Pc8.Wy0Z2/^jQ[34_zQa?+VmNa?(_j1bNJWyOa15V[9b58WT(cEB^j5cA:ZbMbKT0ddDc?0eWFbDB_n;b-)VgAa1JUmJ[J-V};_O(_w@c/5apOb)/Ys?cBEgZ3c=5goLbC/VmMX;NZf8c/3fy3c54adOc+2inQc;.inPb=+b}:c3BUXNbJ?dZ)c=CYp/a?6Wf?c,9VjHc,=b}7aB4X};cET7WYRcB+Wy3_;1b]EaC+VjHc,,X{)_7;Vj?c=3fd(Y;5]b0cE+]l=a:4Vz,^H)Vz.aO*Vp?_O6eb2c0)XgDc@*lJbJ8XmFbL0gi2b--_WB]G;V{Jb4*d^PbO)d^Q[B5fXPc44UWOcAFWn3b,U,hq0cI.atQa:O^^:c44gnNbC;cd0aC8^aBcI/feRaA?asAcIT1aS=[G/U[(^+QU[7c;BWv:a53[^CbPU8c|Eb,/eVMbR=W{Ca,,b]1cG)be6bK2Xt.bR8WtB_5(Yg+bN6b}Ja:3Vm)cG4Wc2c+5]fDb(3U{;b=?]o0bRDZ|2aC/_yOc7F]hDcB*ar1cB/^U(_@*au@_8,d_Lc=T5Xq(c54Xk;b0AcT*_0)UdMc?1Y[CaB)[u(aI4VlH_P4aV8c86UvRc;FWpGc;9dhOaCA[bKb8)VrIcA*VpGaA*Td7c74aU4c(2Wy0c7DUnLa56dl5c4A[bHb0Q_w(b..Y|6b(9Ut2aD)Xh=c4)abHb96djQa.+_cGa;Jen7aO/[jEa0,ct7c8AZ|([OTGdhNc(5YbP[1*WfGbE1WULcF0XX6c7O^|0c+A_b/c=.Wi;c3:Vg?_G;[m?bB7^X(cBIf]QZ2,VT1_KE^VLc5ETuGaK)bk8c+,]dBWN)VT;b6)f^3^JHUa?c+7X},b((hb.c9*^l1cF-eZAcA@][)b92iUEc.)XtBc0C[v,a9T0ac1aJ)fw:b=Q_}Kc/2Wn:aGTRYSK^ET-]|?a3JZa*c+5[y+bK-]i:b0T9fa)bN)_XNa?7ek-a.4]XAc;(^o-]C.dX8aAN^UGc/TAZkJc,1bo,c0.XgFcI,hZ@bK*Vd+bP1XZ@c:+dT+a6T?ZZLc5.VwPcILfS/bG,_}:bO3X{Ec(,Wc1Z9.Wt7c01VT)c5CbV7c++f[Ia+0iAbO/bdIbRAgf1c;.]pAaM.W[NaG6Vr3b=;ikFcA4h}LcA,cxGcI2Xu+cI)V|,cE._X3b8HXqKcET)[u,bIT7ZmDc3+YtL_05]]9bJ6dm;c=-d_McA6fZAc++Wm-a)+bt8cG3Ye0aO+da*bJ4au/_J1[lObD*WrOc=,elBYE-WrAbKT1cf/bRRYmR_3*am,_+)XsE]A.XoL]I-b]IaD*gSRcI-[kAaKF_cLcIOcw-cC6geIa*9XX2c2)Ug=c1(cv*a;)Yu+_55Wf9b4T5cWJc=*Yz3a,)aw?c.8Yh*bH1WcEc;.fW-c+.XW-c3NayI[3)^jFb0.Up)c0;WiBc+9XV6ZK-xJcBLXYHc7/^w.c=,W[/cH*b}-aLT4VX7a1JXqE^64Zs1b,.b_Mc3*Xd;^@IWr5cAMZs)c5T*UvIcGB_t9cE7^yA_/,X_A_8KZg1bKT4WSKcB;Vj?W,Fgd*^/T.Tl9c0NXv._?9ZjM]=6YdBZ.*]mBbGT=dzQb):em4b:Fh{5a:OWlJcE8Wc6a1Cbq9a7@[t?aET=g|Gb12^}JaFCZh*b(/]hO_3;Wb2bK2exE_I2^mOc?=a^2bHIXrPbR/_z4b8.VzAaG@[k2bF3a}@UN=]}H_(/evCa.3eZM_.5Uu0c+T)aj=c9Dc{2a93TUMa@?[hHc;:Zo,c?-]WK_I1a^;b@.X]6]I(Ya?c;/^fRb(2aoAa:-Vf-b-8XlRbJ0V}R_64Y[1^Q0XbBa6TQYl6bN+TZ2aN4VsMa8?YS4_?*ZeDa:7_r1a??WdDcI3_q2c;0_e9aPIZt)b87Um7bP,exQ^KT/Xb:_O*XaE_86a}Kb?@sN_;3UxQcB,X[Rc48hr3_;KZ[/aG)^g.a8?eo/bR,]y7bCT8^v+cF7XaQbF2Wv;b=T)YV9cI-UoFc7Ecb/^,5d^O[L5by.cF1fa3c0)bcCc?,WqO_?T+Wg*cA*WYHc?T7elMc0)c^-_JT(Xq7Z9)Xt=c;RX[:bK?XzNc*HX[RbBEWvP^P8dyOc0*ay4cA)fXAc3Gd}Db=EVh4XB)Vh4V)TBab*c=)ap-_H7YeIc+/ac(^7B_pLaC,aVObJ2XUMZ9*Y[E^HEU}+]1F^T9^C0Zs+c+2bx:a;4Yj:_+,dj8c0T?Yj7a?(b{,Z@5arJa)+V]5b?2^u?c+CZpOaP-aiLc8)Z|+c7.^{3^/4XUCc+EWh=b0+YY2cB7Zp)bN:ZmIb0.Ta:^=-Zk*c3LYc5cB-Uu/c:GZvHc0(]T(b4(eZRc5:eiFc-7cWCc36bkEc?)ZdD_E-ij?bQ-dXMbJ2[uRaQ)hjIZ/1[uJ[2/^fKaC;a}0_K*ft3bK2Xj;_5T.VWIc@6Y[CaF:US(bQ0a};cHT/ZtLb9*]_Rc75YsBcBT-VkJb01YpNb4Baf=c;+Wf9b?-en,bP0XS;bN2V]JaO)]c7bK?^ZK_I)aoRc/7[Y=c/+^q0bJ)gkEa*7Tm*bCKXlC[0.Zf-c,3]dEcB6XqD[R3_^5cC4ddAbOFTjDcAR]q;a?4YZ7cB.^dBbL.fxGc=:^q6c0*v*c/,dj*]N0bq)a:)Zd.c4Q^|1_D,YvJbE.cyIbJKed=a87ZqG]@;bz=_M9vQc0)VVFb08XW?^@2XvGb(-efObNT*f[.b06ZT0cE+[tHb1Lbp6aA/WxAc7PXy*c*2bw5c02bq?c8+XmOc:1Xb.^PKUrJc6IYVJcI1ZlAc/T)n9c;.WX*bJLWz3^A)Wz2c,.a|BcB/[c=_H+WiN]FEXeQa4T4Zm2c73ci,cJ3Ud/c10cZ4b4/Y|3aA*gr@aQD_a-b88cp@]N8^sLbO,W}?cF0XtDaQ8[TIbK4VgPc+8VgFaG+]m2[)-h^8aL=Vr0^Q/VXHaD2ZWQ_:FbY8c/*^oJcB-XS=_66ViPb=,Uk([C*Xx*bN;^zCaIPey=c,+c]=bJGh^:[K8^u?b8,^SCbJ5XxH]/:W|5c.+Ye.^,(cnFb=9XS1aIBdf,c)(gVFcE)g^(c0*Xe)]ABYb1_G)Vi.c-)caIaI1VoE_IB]]Fc/9]hEaA6dY7_75X}5b=1frE]=?YW+_P@ak4b2BUlKcA)cu?bKT2YbEbE5VT2c15cZ(^0*fzRcB=[r=c(;^{(aPPXY*b:TA[s(c74dl1aL(gc2c/Bhz6aL.T})b;5dl@aGT)[d+bG7[qKbE(cg(^P*^l2bJT4X{Bc90]iPa)5]n1b,1Zd1b),by6Z2-_|:^89Xv1[8-dc5b*)fX*cI5[{N^E:XcG_G+f[?c35Xf;bC6anEc?)_yMb83Uv@_*7ZcJ^,DfZPcA-g|(c00Z|.c7)diNb83Xo8_;4[[?c7(e_4c56er(c6-ZYI^.0Wh@b=-[eNbBAdUH_O;Yn/a11VlJc?9ZxLaL,T|IbNIan0cI2Xe._R:bTR_H5a]Fb4-az,c4)ToOc;)[d)a2MY^;b0*YlGa,+bw4^7-e{:bFBp(bOKclDbR*_S4c@*h|?_6)[wAb?2_h7[--Xs)c;T2_cBbNM^i1b=,ak2^/5_lO_C/faDcB,gY8b,,YlLbMEadNc+:fa.c=4UzJbG9ac4cJ:cU7c@0ax?_,2^^8bGKbv0a()^a4]J9Wy:c;0Wd;c31^|Hb0D_]N^0/Yr(^I)Zo9_P/WY;c+.c{Qa9)^bQaP(b[7a25XW;cIPfc6c7?dt-_RJ[aEaG6Zq=_P2[r9_*,Zu6b=*Zx*b=JbX,bK*dw;b:*ZqNc;9[e;c;/VYB[::Uk7b((ZlObO(dtEc**Vk;c55d].b@7ViRc3:al7^C?Z]?^@)Yp6aP(Yp6bN9af6bJ.Ye?c73bz-_+-[[Ec3-f],aH=]S7a?=ZsOb=6ZmD[B-U|Ic+(dUJc(EXs8aKIYXH]A1[s7bH*[SFZ9A]r(bF+_]Dc71cp;bA2avQb(2c^DaG@fpH^K3fS.cB2bf3a5CeZBa-?WwNa1-dUGc5)ZnMaL+YWGa=.Vw0_Q(hwDc++YyPcGT2Y[5c?T)[c9[)([c:a?BUVMc/1ZyNc;3gtKb=1XbEa.-Yb=_-2[^0^ABYbHc,.[]1_92]ZMc+)_y3bOAas/aK*ZlCb:9_rEc05Zy=c;*eU1_.3_WNcB(dU*a13_h-cA-Vv9bNE^a-bC*Yr8bFT.hs/bF3Z[@b(5Xv:c=9biDc00dTGc((dsHcB2[e,^I(]iPa?.]q5b?/Zb8c+*ZdK_OT/_a?bK.WW,c5-W[@aC:]a3b1C^_([6*Yu(cA7cs0b.GXUQaN1VX7^E*a{Ic//]r/bI2Vv?bOT,Wa@bL)cZ1c36WsJaJ+UnCc=1fv?bC4hrAaARZa:a5)^Y.]4L[{;cJ1ek2cB.XnMb=4ZT3bH2e[Q^@-Ws7^M,dfHbH?Tc.a3,WY*c7)Tc3b92Zw-_KEZp/[DJg{.b8-a};^0/^w*a6*cdHaC5crOb2-Wv0b4)XhLcA(cr:bCTBgTRc/3gT,[5)YTLbA,[b3_L,_jPc34f_5c+-Y]Jb;/ZZ-bAOdY:bG)ad=_P0ZzE_Q.iW1bGTC[j(_/0XU*_HE]uQb2,]r0_Q0VV@b6)gy=a?5Y_Ec7)Vs/c+3Ud.aA,^u3bC,dq5a:PZl,X27X[:b6,[}*c.?Zr?a4)b^M[?9bXPb15Vd7b1-^{G^73[rR_:,bc4c90YlH_-8Xs*b5,eX;bO:[Y5_I6f{Hc;1_cQbN(aV*a:T)Tb.^EJXh/a?)dt)_.3U^HbKTHUz@bJ/Zc8[87e^9c7(fS+bF*fS0aO0XmQbG(Yj*_3(^fFc6Q]g=ZLT)fd3b8@Xk5c37ejGaD9Y_;c;TO_[Cc36ge,a::ch0[=+Wz.bO*UlNc;2[m=aC*bz5c?+WuLbN)^wJc,+Yt6c6/[bLbHT1dbN]N/ThN_2,h{.cGTNWdIcJ*XwKbN7ZaQcF7fh(a7,alLc)A_rOb)/ih0_2;VsDc*7UrEaO/YSQbJDVt:bF(ds+cBA_bCb,T+Ui4YJGeZ6a59a_Gc;2Vq)^=+]f9_R7YnHZ@1_l8bG8c^9c1Q^wQbF/XuOb,2bo4aL.YZ9[JAYZA]QIchEb59ec5cJ.[_:c@6Xm)cC7Vv@cB(Xp8a/(_zC_@*Xs,bG=XoKc6/Xp7^,)]}(b08b[3bB+Xv4c4;ayQb9+VZ8cEIggIaA@WhRc;8Z|,bN;YsJbLB_vI]4JWq(bF8WTO]-T.Uh-c2)WdG_+;ZrDcC/W[FbO+Zs-c-.cdN^A0WzGcI1YfHcA9be9c0-^[9a:EcqJb46Yy1aG@bs:c7T(Wd5b6(adIaMDab8c;2YYOc?FVw?c+=YoAa6A^u:cG+fZHaA*a]/a@0^mFbOPbbIc(*Y_9cEU+c}5b?2[n-cIEgjB]/)ZVGc=PdkPb)4]gFb@G[w5ZD8XeEb(T.WyCcCDXl,]:-YS5c+2_|Eb9,gZHbG@YwJc;7Ur2cATEaf1[?=bp0]((dVB]56Yr7bN)Zk1_:([|NcI5YWIc?,bjMcJT)^wPc;-^oMa1@YvFbH5co=a49dXP_P9ZvAb(,at?cE7db6cI4aS)aL1XgIc3)cXDc/1Yk6cA-XY@bI-VmLcB?i]Pc0EbsBb=0ax,aM*e[BbK7cl7bA0]Z7_6,bn@aO.[[)_BMdh)bI*fUCc03Uo:a9)Zs+]7-UcQb=T(Vv*cA(Y_;cA2V}4c7/XU;b,-ZcHb98dX1^Q6_t1c8+V]7c*,bg)c,.XgBaO-Vi*c32ao@c+1[Y:c7HWW.[@-WS(]76fwQc+8Wq)b0;Zw,_//_[1_;-^W1_J.eg:c4)cw3c;+bVRbE*X^8b49Wq*c;0ZY5_85ZZ)cE9WhOc/LWXOcA1^sDb?.YbCcITJ^lLb7*e{.[?7bv8_E)Y_,[0+jU3c4-cf)bR1Vi(]Q5_T5bQ)V{7cE*Zx-a5*TVBc9:cVCc+)WtH[8.gv8b(3f_1a@*jS8_6+f_/a@T)Xv/c3(dn1c/5a}Qc-.^T(bO-Ya)Y*+aoCc/T/_wJc3,Yw,c+,]d0bF0a[4Z+,gULb/JXZ/_PT+YWA_:,ei)b89gy:a72hb;cA0Xm3YG/WsLcA+bmCc4+[xO]K)[x+c?4]s9_Q4W]/b5,]eHc0TBeZ:^6T.WvRa7T+XX.c3,exKcI+]Z1_.._gLcJ=h_Q_R*amMbH(ha(c5CYUDZC(bnMc(;YaKbKCbmGc.+[X2aA+_^5[?CfW;c+0Wk/aRFXnBc=4Vx5cIRVS4^+McS1]EMav6bN?Ze3_K)X{4[M*[|0c;6_T1^/DbY6c/=bt)b(4esIaG.Y{7a56hx;aI=Ya5]48X{;a62c[*bJ-Wb?c+T4Xx-cB+Vk@c7IYl3c:-Yn.c75^x8cBK_fJc5+dh0b0-YkKbR/fh;^3;Yl=cET@h_3b?4bv,bG?bdCc(?dXH^F*^u4c3)[vNc;6ew0Z7-Zd-c4-XfHaC(^]-bB6^r6c=LcZG^3*Xs@aEMca4_B0Z_HcE5Yb1c/-]k6]=+ZW:aME^X?cB1ZxMa-/eWRc0.aqHa2-i]4c--_]6a53^_)_R0_U5^AT*b_7_85^x8_@/Z}Oc+BbZEb4BZvAb@3]s-a7RZv0c;T/YfOcI1ZZHa0@_S0^M9ZVC[O)ck2c/3bc9aM,]r9c4/^XMc//Yf5c@4WsF^.2Xk0a@1cc-aQ6_sDa)*_wF^0/dy)aK+cX6^75[p6bJ)bv6c4(bv6c43dTBbJ*Zb1_LCVX:_71bZA_?.bVKaPL_Z?c-9_V2c-,dTObR.ZU-bJ9VbBbH-fYMcI/_W2bK?Xu3c=.X]M_L*TpKcBAZy9aK*cq/cE/cg1aMKT{Dc?KXu8bEE[[4^80gd/aI9[X,bKT/[]Ob4([_AcE+gy9cI:drFbM*V[:bR3Xg8bJT0^c6cI4WTHb=,[o3c8?YbF]-@Zi,a3T6_l:bB)bn3b9Lc}Q_:6[vKbC0bb.aDAh[)_.-_W=aC,c^FbO+ZY?[6)cXMaP,hcK]L2^cM]4,[h)c60ekDaMHbhCbD0YW;b)6aXGcE4avRb9+Yc.b38]_9c+)Ve*_;5Ye2bJ.TtQbF+]o:a1*ba1^E2fqMaG6Yn4Y;*deHaO,XgMb+NZU(bR9[^La:6_p0bR9c^@c3)giMa9T,W}4bB,X]J]I3^rRb.IZYBc?/Zq([?)_g2c+BYUKbO;WxE_*:[|Ra-.TYDcA6bk:c;,^h6bB+h{4c/2Vx9c/(XVFc05[hEbRT+Yu,b?(arCc37Va1_O*]f7c5)[j2aO8X^*a=1XjKc0)^m-c=,X^LaN8X}6b,3fi4a8/[{?bL*bj1cB,cc+bF,Tz1cAAYW-c+.XpCa)0[{Ac+4ZwKbL*e{9bB)YtRb3T5]e=b(0]rK^F)axLc36bj/bRT/_u?b@0cq4b;*_iAb@6db1UQIgY)c+*^p?c37[YDc=IZz7c3:[[5c@:XS5c49Xl7bD7ezDcE.]u)c8UJ]nMa/:faQaG=U[B^MB]rEaC-VT.c70YY+aO,ciIc-AYh/a=)df@a.*df3_Q=dZ;_7)dZ9c,)Zs)c3)^|+aG.X}:bBCU}Ba6)_cMc31Zi7]/(bY2_0.hj9b87by+a95[TKbC)hq(b=.^m6c=4]iDc-(fS?c;7axG_70^XM_27^T0bC5XyPb/T+U|Ac,3XiQbG+bS5c;FX^Ac7.Xk.bN,[_Nb1)^S/cJ,cn,c:.clKb-2cpJ]JT,]k6c53ftHa);fS:bIJVaE_-+b^@b=1XYHbL2WiLb0Fes8aCCdW7bM6[YLc00[S+aD+cT/c(1hZKa9-dW)_33[wOaP)be=a()_Fb9)ej7c5,doRbJ)csHcI4[S:aL/ZlIZ),d{8_+._i4bR+[t-bPCZ{Rc;,ax6c/._[@_Q)_[?aH*XnFb8/gh7bR5Y^Mb;+fm*c/2Ur*_B-cn?b.)^S?a93_S8bN+[^3aH=[[+]N7d^Fc;2atGb73WeJa?/Vk7b).Ya(a7+acMc=0cm=]80ab;b67]Z8bF3ai@^M/bvRb95cjLaD*UtNcI0er@b;Cfb@bJFbw3c+0e_RaH4^T)^MQZsKc(0ZY3[)6^^Rb=0[f.cI+XqFa-1YY9c,2UjDc?*^zOc4?Wo.cBAZSBbF5[WR^;4fU=b=*^]7bB(chNc(@acE[K6[wDc;F^X0]B-WhGb.,Ya1_03bm5c4(cWFbG3[tMcE+W|9c;)Zf*]=*aT)aO8dS-b3/clAb.T)[ePbN,Xy=a)+e{IcAG_fEb-1hv=aP7Y[-^Q6[[;[E/Ul2b8+XrFc;+YT-_*U)fh8b(,cfDc;8eo2c@Bgt+],.]t4b4EZnEc8*]^,bKA^}1aO*dcR_?0fl?aKOXbAcAJb]Bc,*aiCbR,cbPcC.ZqLaA(hfM_MLb^7a5/Xa2bC(d^*_;,afRc+,__CbOGfU7^;-UtMbG@[gAaC,bg6bF-aVBb5N^w5b(T7Yi2bM(aZ8bGHfl1cC7^UCaK*^mFbF*[TIbO)gjB_PT2[lR^B*[v0_H/[jGc7C^pJc76Xf.^I2bw-b+)W]@aG:Xd=_8KXxO^H+dxFcA1c]?aFT+aX5b/+Z]*cB3Zu;aH,]U2c0.bUCb()Zx-bK(_V1]CKdT0b+)[zBc+*bW*bN-[WKc(,a^Ac5,bV*c8*^sF_R?ZYPc+Ce{2c+:W^)c0E_U5c3:bo6_E5boMc7+^{@c3:ag1bR)Xk,c,7ex7^81Zi8bJQ^d9aM+cT9],*cT:aO?Ul0cK/eq9bK*bxMcA?cv,a,Ig}Ja0CWdBc4AXb0bN9el5cJ=_m)_L*X{Hc=2euQc-4bU=aG-dsOb40c[Ib@6]g?b(-W}8aCRZt:bO?eq)_J1eT*b0,ZsD_P)^kI_@0aU)cI)]xIa?0[k,c04ap6c/6]S2bH3^Y6bHT+f^0c?D_c7b,1ca-a1+duOb=KawO_C)ZzHcIH[t@b8(^o(bO.eX,aQ2au3_D+ac9cEMer=cHN[u7aP*aWGb61cl0c=T([xAbH0btHbJ*dpKcBDdY2aC)g|2c;LeV/[CL_n/c=:Yz7bF4_|K[6-[cDaC+cr@aIT/az:^4,d_8c3:brMcI2WS+b50hUK^;DaWEc-6a}8aG+]f(cJ;UV6b?T(XU*cC8daPb2+dk+c+(fS?aL.Vp3b=*]f?b@)_t4W@4_{LaQ)be5a=QX|?b4/ea9bN*bpPbI-eeLc:,[g-cA6^vP^D/WYNc7KfkDaN*^bLbO/bl=_PL]q0c9._r4a15bmEbN-]rOc+.^s7bN+dW=c6AXrJ_*+_h3^37e{La@3ZlHa0)d_Ia?+fr+aL-aq/c/3aUIb4+cy/^EJZh=_M0VqGb,/diQbFDaqPbF2[x;aGLce/bF+UhDc,+bT,]O2Zm2a93bgGc,0eY4c==YiQ_?*]j:c?,YlIb5+dWHaN/au;b92Y]-cA,YqCc-*Us:c/3UT7^I2XbQc41_rJcB.cS9a.5ep:b(.gf1b15Vo8aD(bp(c:/Us;b9-]V?c+*bpFb.JZeM_F0gu-_MAaz3cJ3an1c++YZQa:,c^Mc.Aas3c6*_l@bJ1YyEaL+^nAc03ck0bQFbV@b(=gV:bBLfT8c5.c}=bBEbj1aNBWf+aDK^nGcIQUw.]M,h|,_@DdVHa=T8bz3bFKYeMb8,^n)]07gVMc-2byKbK3bx0c:?][;c5R^m,bC+e_8a6-ffR_7+fzLc81e_)^=HcX(b-*aj/a?*Wh0c03dVAa@NbsMa4,Zi.c/+crAc/,edJ^N)biGb05cSG_M5eX7c?Pbo7b8/diPb:Jgp.c@,]](_:/d]Aa74[WDcA*][L^++dkGc37fa2c4+dW?bN1cxFaRO[fIb93gWHc+;ab-cF-gz)c(5avLc87]ZJa5:[{P]+1gb-c0T*bn3bF*eY9bR.di8Z54XqObN7dm.cC?_c,b8FdYLc:.ck*_E)Xp+bOTOZa0cA2V|3YD*b^;c/TEelPc,6[k0aO5d_@bNKie1bBI[m-a7BdTMc?+cb/^K+fd@c;)icCcI-g[5_/,^cQaC4[i7c;0ejKa?T@el-bC1hnEb-T,]jQc.T(aU/^H,TV+c7HcyRa*)XeNb((e^Kc2*a^Ab=TEagC_Q5Vi=a.T8^eBaE:bx,bNBXV6],(ag1^)*VdNaA3aU@b=CTT=cC)^lD_:1b]:a5)blEaN*bj@cA0a_Rc05cb(c/,am4cD+_z1aR/[{+b+/^t8b(3amD^7=[k@b*(dy)cI)ViDaQ6YrQbJ2[u7c7CckCbJ:Y{Nc0*eVOX=Cdp?c*)Ut7aO.To9cG/eqBb;;ijCc+Ggo0bO6aiA_AGWjI_I8ffBcCDbr4aC,Uw+]C9gUG]F*fkO_J8ccN_2@ZqI_(+[Y+c;+csIZP.YTKbF7anFaQ)anF_:DcuGaD3dU)_H0i_QbB.]lG^7+^W=_F+_f6bN)ee6c(LXh:aQ@eZRa7:Uj@bB(Zo3c;1X[@aDBYq2aC.d{QaPI][LcA8Y[+bK?^TBcG*cULc.)Wl3b(/V_=c,1ZiG_,7b{0a()^U/bFD]o0a.Gd}@a4+eV9bJ;X|Lb93cq.bKKcTOaL1hs8cI+[lBc7)VsN^4RabQb0)a[6bG1ec6c-Hes=c4)el(cA/eU/cE3ZlIc--]kGbK6dmL^AC[uLc=HbcPb9*d}QbJ._}ObJ+er/bM2[}7c=;_[Qb6(_[Rb.9ftRbK=ecLa-4_mFcF7WmQc5-bS5c0Ne[/b;.YxEa1T*fg;c37YX+cACYWBb6T)fTQcA6^SCbI8[c/a61_cNc)/Tk4aQ3d{5^57W[+b12_f+c?+iS-c;@[oQ^Q,ZX+c/:h[;c?*Xu.bK(Yx3b0,cf.c5-ed;a*Adb/b0+Zs*_NTHVW/c/)[ZDb4,ca7bN1X,bGHUS+c-1]cA_LKfV5c*,_z:a.TJfwDbO@XzBc5Mca;]4.YSGb64Zf4bC)Yd6cI)UcQb)T8_yL_J8d]D^1T)[^4b0,hxFcB)[z)b:)Wd0c,+_bC^CTHfc1cJ1de0_.Ccx2_?)Yy+a-)[l4b;3^YRc26d{8aG.gY5ZM6aTFcK=fq(bJ-d^@c?)gf;b,-em@c*=Wc4_AT+XwQa58^YJcA(_lOc9(bk8bRT-elQc/,bUD_*0[qO_:K_j2b,*]mAcJ+[S:c)T0bm:c,1[]4bB*]Z0bG3Xw(c3/bvGc,6i_LcI;]k;c,+^_FbK+e^ObO@dUNc;HY[=bR+U{0_03[TG^;2ej2b50Xo;bH3[ZDc8.dX+b37b}Gb=-goPb=;ck1c,DhW1]/+[WE_L*UfRbK4bc1c8Ae^*b0Bbj6_NT3fyQbGG^TM[FEXv.b8/Yp:cEMeoLc3AXd2bRGeX9^MRda(aC+[b*c-A^]Bc7OeW7cJ/Zm7c,Pdj/aH/[e+_GL]tGa.(bS3bG0gVMa6I_e/c,?fk;c,+bWNc4E^|Rb(E[rI^0,dx-b*TBTi?^3+]T=b/=hZN_L,Z{@b0(c{2cK,euHa,+^x4c0-_dHb:.dm8c+6[h(a1=haKb0)[}Jc=)dmJbL8d^Jc+,fqI_4D[|+cF/cX1_J)_y0ZI9ah+cG(atE_:.bt-_(4gXGc=+YtP_6+]nHb(@f}/_8JbfRb92]mJcK5]cBbN5elA_-4[u6[D2_T-bN1f{,bK8ZT4aGDXV3bQTPca1aO0VS6bR/at6b6JUf7bK/x?b7KbUHc3@fc0c+BcX=bHFbu=aN4]VPaQ8bTRc+8Y^I[K4^[/c/Mfg/c.8Vc.c?8ghEc3T*Y_4bF6g_8b)6aXPbFT0WYI_AT0gYNcK9hf(aI+YXHbJT)_iJcDMZb1b=4^tRc()a_)bO+_q4c0Le}Rc24fmQbFT*eSLbN.ToGc?3]{1bJ*^g?a-(aUAc34V{Pa14ge4_8,g[Pb9OZj0cD0^mCb53gZ4b9/gWLaP*by.c0=cY5c+-_aGaD-^p;[G,Vn-c(1eUCb),YS-_M8]U7_6GbrE^9AbT)c,:b_Nc3=XWQY3/Yu,_H+YoQaLE[iFc24coLbRHhaOa9-Yp,b?+coN_81Yw2aA*_g3]J:^[1cI+]bCb;(aVHc9)hU.bH3fnP]G8esQb?8ftMaP8fh4b.*an3cA1f{9bB-bpHcJ4g]Ic9?cvLb8=i|+b4@cWBcA-Zr0bP,eWFbF+dfI_M?[[1b7)ZeBbE?dvAc+8fi4_/FXu6a89d[/_+BXsRb((fj.cA:]Z:b8*]u*_2*]nPc73^UIc/OThPbG;gZ8c0+Wb9bA3Vk+[HD]X-cIT2TXDb)0]tNb45_e3b=Fe^)_H7cV1a52aYAa4,[XEb(+^k3^ATKX]RbP;Zt1bJ)]wPcA)ezK_DF^X:c39]W)c7+em7_H3UW@b72Vw+b74Ub;c5-^xHa4OhX2bKF[r7bI+_];c5+iV6c4;ggHbG5U}-_H@ci6cJ,_^Pa9QUpKbO)YU-bJ1^qP^17_uAc(*byBc8(foR_)-XjM^M5edH_=3XiC_+)ZhKc?-iV@bF,_]DbH,clPbN@dw8_H0]fPa5Keq5^72Yx2_6-hFc7KhtMc+1dg+c=FVbFaELfg2c/:^j6cAK[^(b.K^q:^I4Zx(cI1hh3aQ-df7c*MY{Ac7=Xy)c;4hpFc80ew;_Q;^[8aKT+fh+b))g_0b,2YtEc+)bT2c7;dc?a=T3fWFcA+ZU;cB0d}(_M/Zi,_-0VxPcJ+ag(c.G_}M]B)di2b3.doGcA0cZRa52afLcAKXVGcG+XX5Z08ca:[GCXu(a9,[h/a2Cde@cB)dq)b(TNWc*a9*XYRbK:TT*^R/eS5c5:biR^M0aY8_0RimEa:*[d6b01]T;c+AdY@c7;WmG]JT3]VG_+,glQ]N-fcHbB3bo)]N:dqFc;)TZ/b3KYU)bC)ix=cB6ZZQcI*gTRbQKdx5aD;_y(b.-YuE_H-]v*^5?ar/cA@]b7c31eT5c4AdiRc78is;a22[vM]8.[tDbJ6dWNc?/^WFc/+_t)a?CdT6c+2Yw4_2AdoRbM*enDaM:XS)c,6ei?b3=bZ6bI1ZZ?X5TNaW2c45^vGbB/Z[5bGBfhKb()Zr3c0I_UGcB0WfF_*5Wo=c01Z_3bK2^Y*cA=ds=]RLduCaO/[]1cIPYl?aP*gqNb94cU)ZJ-_YE_G.XtFc72ep0a)AW_JbC-aj0ZL.Uj5bH6]u=b?TJftNa5+Zy0_L2XjH_8)YV5bN-_vP_M.bs3a:.WpJc54b]-cF1e]4b9-el=c-/hpI_C@Z_9bR9^|9bBP[ZI^4,_s6b)3Zd(cB(ft;c,1[T;a0)XmQc5,_xPb=/Xy)cB2Xb5^E,dy:c?6auMc0T2_sAaPT(em)_IT)fiObR*aT(cAT+]}?_37hk-c;:Xv?c7H^_RbN+hXLbG5]nF_2PXf(cA+fTBbP.]u6aE/VbBbP2_W)^34VtQ^K8ek-a;0]n1_?5XwNbH3dpKcF4gv3a02Yw5_D/]l.aG0]W7b/6[kMcJ(^W)bP-ei1bB;dr4c8A_c3b)7bjL_Q1cb8c(,d^3c5:Zi8c.Kci0b3Ifx7c).[zEb-7[aR^M.aZ,b)T8WjOc1Icl(bN(gWMaMBV{GbR+bi0_CK[^6_EGWfMbH8^x.a?.jVPbO+dv6c+/VsJbR)hV2bO=bqJcE6_h._:.a4bKT.V[/c*/a]3_LT+fpDa=T@dd9b0U*Y[@_@7[](a-*Ti@c6/bdJb9CcfLaL2^kPc=Adi4bF)cq9bR1[yEcB0h]=cC-Xo.a-TB^|4c-T9d}Ic3*e]D^;,]Y5c/2Xa-a-,ayJbF2dx,_65Tl*cIOer1b4*hp5c=0h{H]4)hj)cI?]SDaH/_x1cF*_d;_(Ad}4^Q3YyAb8D]b*cA?[l+bC1[m-a81_l8c=-^zG_I?[xEb95[}+_HK_{9b*Ic[2aC2VTMc0([jNb,BTbFc/TD[hOb5)e];aK:_X)aE3goJc;?fk3bL)fq-aC2Ws)b+(]_Pc/KgtJaO)^dAbJT,gW?bA,ZcK_PE^w3c42cXHc=)dTGc@F]j7cA8[}Jc0R[gJb+(_v;c9H_U5c(/{Pb(;a}4b))]S?cB.aS9b53]o.c7,^bDcATJfk?_L=^rAc8UNfbIbP2V[Pc=2{0c/*VU7aG1bqEa*T-^_FaC5WfHb(+fc(a?8_j?^K/Z[0c()cr@c5@Uz._H';
+  var CONST_DATA = 'Aquila!UjBUj,UiE~Uj,UgOUj4~Ul+Uj4~UgOUf,Ue@~UgOUf.#Andromeda!CUCWR~[LWRW,VE#Sculptor!U|+W2U{0U|+#Ara!U_/U[6UX:UWFU[0UZDUZCU_/#Libra!T}AT{JTz0Tx*Ty/T{J#Cetus!]5^8~Z4URT4~URWOXKZF^2_1_E^CZ4~]L_1~]L_0_Bb-aO_I^8^M_B#Aries!a+[QZQZL#Scutum!Ud*Ud+UdGUb3Uc(Ud*#Pyxis!TY4TYJTZ9#Boötes!Tw+Tu3Tw7Tz)Ty(Tv=Tv;Tu3Tt+TsA#Caelum!iQjMjQ#Chamaeleon!TW.Te)Tl4#Cancer!TZ-TYITW4~TYITYNTW)~TYNT[2#Capricornus!UlHUm(UpGUqQUs0UsQ~UqQUr6UpG~Um(UnO~UpGUo@#Carina!T]:Tc/TeBTeGTgATf=Td3Tc8T]Q~TY:TWBuB~T]3T]Q~T]3TY:~uBw+~TWBTUP#Cassiopeia!ZPXPW+UGE#Centaurus!TvRTtDTrFTt/Tt9TsCTsBTr,Tq6~TsBTtI~TsCTvGTxI~Tt/Tn4Tm0TkBTi5Ti9#Cepheus!UuGUxJUr@UqDUuG~UxJU|BUr@#Coma Berenices!Tp?TpCTm,#Canes Venatici!TmHToD#Auriga!s+s)n)lHl3~o-l3~o-s+#Columba!u8tNrKr)rR~r)pRoF#Circinus!Tw0TzO~Tw0Tz2#Crater!TfRTgHTh?Th1TfR~Th1Th=TiATjPTj,Th?#Corona Australis!Uc?Ue-Ue9Uf0Uf@UfDUf:UeMUe+~Uc?UbF#Corona Borealis!T{?T{0T{ET|BT}.US*US:#Corvus!TmATm5Tl,TkHTkC~TkHTmJTm5#Crux!Tm=Tm*~TnKTl)#Cygnus!Ug/Uh5UiBUm,Un@~Um,UnQUq/UsD~Um,UjIUh8#Delphinus!UmHUn(Un6Uo)UnGUn(#Dorado!q5r7p+q5~p+j/h+#Draco!U^,U^4U[+U[:U^,UfHUiLUg)Ua=UY-UUBUS;T{)TtETmEThR#Norma!UTDUU0UUNUSAUU0~USAUTD#Eridanus!YD[*]B^5_3_6aFc=eOf+h3i-j4eHdFc8b._Ka?bRdCe/j7k3kNm4m:jA#Sagitta!Ui5UiHUi0~UiHUjQUkJ#Fornax!a(bH#Gemini!w*z({O{DwF~{O}LTSP~}LTT)~}L|Bz?}H~z?xF~z?wAv-~wAu?tAs7#Camelopardalis!d+fFkP~d+f1kP~f1nE#Canis Major!xMyNy+wEyIz4{-|5~y7yBz4~yBxNvPvH~vPu;~vPwE~y7x4~u4y7~y+xM#Ursa Major!Ts;TqBTo4Tl+Tg4Tg0TjITl+~TjITj1TgFTc9~TgFTcL~Tg0TaRT_8T[F~T_8T[5~TaRTaLTX9T_/Tg4#Grus!Uz.Uw3Uu7Ux6UzCUz.~Ux6UyF~Ux6UxH~Uu7Uu2Ut6#Hercules!U]*U^1UZ9UYHUY=UW1UVBUU/T}=~UW1UW(UV1UU8~UW(UXBU[,UY;~U]@U^9U_5~UXBUY=~U]@U[,#Horologium!gM_5b2#Hydra!TYHTY+TXRTZ.TZ2TYH~TZ2TZNT]BT_5T^MT^FT^1Ta-TaOTbQTd-Tf2Tg8Ti0TjHTp8Tq4TtHTu)TuNTwP#Hydrus!TDeI_2]O[3#Indus!UqJUmRUoKUqJ#Lacerta!Uv/Uw:Uw4UvKUvHUw=Uw4#Monoceros!t@zD~v,zDx)u@vBw9~x)w9uL~zDTUGTV2~TUGTS?#Lepus!sErHq?oPmH~oPr,q4o8m)~oPo8~mHn7~mHmI~m)mH~mImE~n7n8#Leo!Tj;TgRTbKTbGTcFTgQTj;~TcFTc6Tb)Ta?~TgQTgR#Lupus!T}4USQUS3T}4~US3T{GTzCTzE~TzCTxF~T{GT|+TyKTw.~TyKTvL~Tw.Tv,~Tw.TxF#Lynx!T^4T^/T[MT[9TWE|Fy2u/#Lyra!Uc.UcDUd6Ue;UdFUcD#Antlia!Td/Tb8#Microscopium!Uq@Up8Uo6#Musca!TnDTj.TmCTn)TnD#Octans!Us2Ux@Tv.Us2#Apus!TwFUV@UW2#Ophiuchus!U[FU]8~UY1U]8~U[FUX8UU*UVLUY1U[3#Orion!q*p?oK~t7t5~t7s6r8~t5sMr8~t5s3rCq*qDmNoKo+p3rC~o+k@kFkOkQl8~k@kCl*~sMs3#Pavo!Um4Ur5UnKUkQUm4~UkQUk2Uc:Ue/UkQ~Ue/Ud:UaHU_;Ud:~U_;U]?#Pegasus!QUz)~UyOUx7Uu;~UyOUxLUxBUu4UsH~Uz)UxCUx0UuBUsE~CUyO~CQ~UyOUz)#Pictor!x.qKqA#Perseus!e2f;fKfGe.cJb4a0~cJb?b5a.#Equuleus!Uq,Uq4UqRUq:Uq,#Canis Minor!TS1|J#Leo Minor!Tf:Td4TbHT_A~TbHTf:#Vulpecula!Uh0Uk5#Ursa Minor!^BU[9UW:T|GUU(Tz@Tx)T|G#Phoenix!WLWDTEWL~WDY2ZNWDY,TETFGTE#Pisces!W8X8~W8XCX8Y3Z5[@ZMYPY/W:V:T7U}PU|FU},U|MU{JU{)U{7U{PU|F#Piscis Austrinus!Uy?Ux-UtEUt)UuAUw?Uy7#Volans!TSBz6TV0TSB~TV0{?~TV0TWRT[BTV0#Puppis!TV.TT9{@w+x8}+TUPTV.#Reticulum!gOh,fIe1gO#Sagittarius!Ua:Ub/~Ua0UaNU_)U]B~U_)Ua:UaNUeJUcKUa:~UcKUb/U_O~UeJUf5UdNUcK~UdNUe4Uf(Ug1Ug=~Uf5UhLUk?Uk*UjAUgF~UjAUgE#Scorpius!U[AU]3U]CU[MUY4UX*UWNUWHUVEUV-US5~UV-US/~UV-USI#Serpens!UTFT}/T}3T|IT{FT|MT}OT},T|M~Ue)Ub-Ua?U_,U^@U].U[PUZ,#Sextans!Td;TbJ#Mensa!oIk*#Taurus!o-jRiF~j6pG~h=hR~h=fOcM~j6iF~j6iHh=~iFi5hRf(#Telescopium!Ub2Ub,#Tucana!Uv9U{*T5~U{*U(#Triangulum!]E]+ZJ]E#Triangulum Australe!UWCTz9T}HUWC#Aquarius!UrGUu/UvDUw/UwGUy+UzOU{A~Uu/Uv3Uu3~Uv3Uw;UxIUy1Uz9~Uo-UrG#Virgo!Tj0Tl:Tn5TqGTu*Tu4Tw1~TqGTr5Tt@Tw@~Tr5ToAToP~ToATn5#Vela!TV7TY7TYOT^9Tb3Tf)Te.Tc1T_)T[OTV7';
+
+  function decodeUints(s) {
+    var seqs = [], cur = [], acc = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = CODE[s[i]];
+      if (c === 82) { seqs.push(cur); cur = []; }
+      else if (c >= 41) acc = acc * 41 + (c - 41);
+      else { cur.push(acc * 41 + c); acc = 0; }
+    }
+    seqs.push(cur);
+    return seqs;
+  }
+  function decodeStars(s) {
+    var v = decodeUints(s)[0], n = v.length / 3, acc = 0;
+    var ra = new Float64Array(n), dec = new Float64Array(n), mag = new Float32Array(n), col = new Uint8Array(n);
+    for (var i = 0; i < n; i++) {
+      acc += v[3*i];
+      ra[i] = acc * 0.005; dec[i] = v[3*i+1] * 0.005 - 90;
+      mag[i] = (v[3*i+2] >> 3) / 10 - 1.5; col[i] = v[3*i+2] & 7;
+    }
+    return { n: n, ra: ra, dec: dec, mag: mag, col: col };
+  }
+  function decodeFigures(s) {
+    return s.split('#').map(function (part) {
+      var k = part.indexOf('!');
+      return { name: part.slice(0, k), chains: decodeUints(part.slice(k + 1)) };
+    });
+  }
+  /* Unit vectors (x toward RA 0, z toward the north pole) for a decoded catalogue. */
+  function starVectors(st) {
+    var a = new Float32Array(st.n * 3);
+    for (var i = 0; i < st.n; i++) {
+      var r = st.ra[i] * D2R, d = st.dec[i] * D2R, c = Math.cos(d);
+      a[i*3] = c * Math.cos(r); a[i*3+1] = c * Math.sin(r); a[i*3+2] = Math.sin(d);
+    }
+    return a;
+  }
+
+  /* The coastline pieces are polygon rings that the build split at the poles
+     and the antimeridian (and, as a side effect, at each ring's start). Chain
+     pieces whose ends meet, then close every chain: along the antimeridian
+     when both ends sit on it, through the pole when the ends sit on opposite
+     sides (Antarctica). Gives fillable rings in lon/lat. */
+  function landRings(lines) {
+    var rings = [], open = [];
+    lines.forEach(function (l) {
+      var a = l[0], b = l[l.length - 1];
+      if (a[0] === b[0] && a[1] === b[1]) rings.push(l); else open.push(l);
+    });
+    var used = open.map(function () { return false; });
+    for (var i = 0; i < open.length; i++) {
+      if (used[i]) continue;
+      var chain = open[i].slice(); used[i] = true;
+      for (var grew = true; grew;) {
+        grew = false;
+        var head = chain[0], tail = chain[chain.length - 1];
+        for (var j = 0; j < open.length; j++) {
+          if (used[j]) continue;
+          var s = open[j][0], e = open[j][open[j].length - 1];
+          if (s[0] === tail[0] && s[1] === tail[1]) chain = chain.concat(open[j].slice(1));
+          else if (e[0] === head[0] && e[1] === head[1]) chain = open[j].slice(0, -1).concat(chain);
+          else continue;
+          used[j] = true; grew = true; break;
+        }
+      }
+      var p = chain[0], q = chain[chain.length - 1];
+      if (Math.abs(p[0]) >= 179.5 && Math.abs(q[0]) >= 179.5 && p[0] * q[0] < 0) {
+        var pole = (p[1] + q[1]) / 2 < 0 ? -90 : 90;
+        chain.push([q[0], pole], [p[0], pole]);
+      }
+      chain.push([p[0], p[1]]);
+      rings.push(chain);
+    }
+    return rings;
+  }
+  /* ---------------------------------------------------------- ephemeris ---
+     Low precision but honest, all in the mean equator and equinox of date:
+     Meeus for sidereal time, precession and the Sun (~0.01 deg); Schlyter's
+     series for the Moon (~0.05 deg after topocentric parallax) and the
+     naked-eye planets (~0.1 deg). Degrees in, degrees out. */
+  function jdFromMs(ms) { return ms / 86400000 + 2440587.5; }
+  function gmstDeg(jd) {
+    var T = (jd - 2451545) / 36525;
+    var g = 280.46061837 + 360.98564736629 * (jd - 2451545) + T * T * (0.000387933 - T / 38710000);
+    return (g % 360 + 360) % 360;
+  }
+  function obliquityDeg(jd) {
+    var T = (jd - 2451545) / 36525;
+    return 23.4392911 - 0.0130042 * T - 1.64e-7 * T * T + 5.04e-7 * T * T * T;
+  }
+  /* Rotation taking J2000/ICRS unit vectors to the equator and equinox of date
+     (Meeus 21.3): Rz(z) Ry(-theta) Rz(zeta), row-major. */
+  function precessMat(jd) {
+    var T = (jd - 2451545) / 36525, s = D2R / 3600;
+    var ze = (2306.2181 * T + 0.30188 * T * T + 0.017998 * T * T * T) * s;
+    var z  = (2306.2181 * T + 1.09468 * T * T + 0.018203 * T * T * T) * s;
+    var th = (2004.3109 * T - 0.42665 * T * T - 0.041833 * T * T * T) * s;
+    var cz = Math.cos(ze), sz = Math.sin(ze), cZ = Math.cos(z), sZ = Math.sin(z), ct = Math.cos(th), st = Math.sin(th);
+    return [cz*ct*cZ - sz*sZ, -sz*ct*cZ - cz*sZ, -st*cZ,
+            cz*ct*sZ + sz*cZ, -sz*ct*sZ + cz*cZ, -st*sZ,
+            cz*st,            -sz*st,             ct];
+  }
+  function mat3Mul(a, b) {
+    var o = new Array(9);
+    for (var r = 0; r < 3; r++) for (var c = 0; c < 3; c++)
+      o[r*3+c] = a[r*3]*b[c] + a[r*3+1]*b[3+c] + a[r*3+2]*b[6+c];
+    return o;
+  }
+  function mat3Vec(m, v) {
+    return [m[0]*v[0] + m[1]*v[1] + m[2]*v[2], m[3]*v[0] + m[4]*v[1] + m[5]*v[2], m[6]*v[0] + m[7]*v[1] + m[8]*v[2]];
+  }
+  function eqFromVec(v) {
+    var ra = Math.atan2(v[1], v[0]) * R2D;
+    return { ra: (ra % 360 + 360) % 360, dec: Math.atan2(v[2], Math.hypot(v[0], v[1])) * R2D, r: Math.hypot(v[0], v[1], v[2]) };
+  }
+  function eclToEq(lonDeg, latDeg, r, jd) {
+    var eps = obliquityDeg(jd) * D2R, lo = lonDeg * D2R, la = latDeg * D2R;
+    var x = r * Math.cos(la) * Math.cos(lo), y = r * Math.cos(la) * Math.sin(lo), z = r * Math.sin(la);
+    return [x, y * Math.cos(eps) - z * Math.sin(eps), y * Math.sin(eps) + z * Math.cos(eps)];
+  }
+
+  /* Apparent Sun (Meeus 25): equatorial of date, plus the true ecliptic
+     longitude and the distance in AU. */
+  function sunEq(jd) {
+    var T = (jd - 2451545) / 36525;
+    var L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T * T;
+    var M = (357.52911 + 35999.05029 * T - 0.0001537 * T * T) * D2R;
+    var C = (1.914602 - 0.004817 * T - 0.000014 * T * T) * Math.sin(M)
+          + (0.019993 - 0.000101 * T) * Math.sin(2 * M) + 0.000289 * Math.sin(3 * M);
+    var trueLon = L0 + C;
+    var Om = (125.04 - 1934.136 * T) * D2R;
+    var lam = (trueLon - 0.00569 - 0.00478 * Math.sin(Om)) * D2R;
+    var eps = (obliquityDeg(jd) + 0.00256 * Math.cos(Om)) * D2R;
+    var e = 0.016708634 - 0.000042037 * T;
+    var R = 1.000001018 * (1 - e * e) / (1 + e * Math.cos(M + C * D2R));
+    var ra = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam)) * R2D;
+    return { ra: (ra % 360 + 360) % 360, dec: Math.asin(Math.sin(eps) * Math.sin(lam)) * R2D,
+             lon: (trueLon % 360 + 360) % 360, R: R };
+  }
+
+  /* Schlyter's elements: d = days from 1999-12-31 0h. Kepler by Newton. */
+  function keplerPos(N, i, w, a, e, M) {
+    var Mr = (M % 360 + 360) % 360 * D2R, E = Mr + e * Math.sin(Mr) * (1 + e * Math.cos(Mr));
+    for (var k = 0; k < 12; k++) {
+      var dE = (E - e * Math.sin(E) - Mr) / (1 - e * Math.cos(E));
+      E -= dE;
+      if (Math.abs(dE) < 1e-10) break;
+    }
+    var xv = a * (Math.cos(E) - e), yv = a * Math.sqrt(1 - e * e) * Math.sin(E);
+    var v = Math.atan2(yv, xv), r = Math.hypot(xv, yv);
+    var Nr = N * D2R, ir = i * D2R, vw = v + w * D2R;
+    var x = r * (Math.cos(Nr) * Math.cos(vw) - Math.sin(Nr) * Math.sin(vw) * Math.cos(ir));
+    var y = r * (Math.sin(Nr) * Math.cos(vw) + Math.cos(Nr) * Math.sin(vw) * Math.cos(ir));
+    var z = r * Math.sin(vw) * Math.sin(ir);
+    return { lon: Math.atan2(y, x) * R2D, lat: Math.atan2(z, Math.hypot(x, y)) * R2D, r: r };
+  }
+  function sinD(x) { return Math.sin(x * D2R); }
+  function cosD(x) { return Math.cos(x * D2R); }
+
+  /* Geocentric Moon in Earth radii, equatorial of date (Schlyter, 12+5+2 terms). */
+  function moonGeo(jd) {
+    var d = jd - 2451543.5;
+    var N = 125.1228 - 0.0529538083 * d, w = 318.0634 + 0.1643573223 * d, M = 115.3654 + 13.0649929509 * d;
+    var Ms = 356.0470 + 0.9856002585 * d, ws = 282.9404 + 4.70935e-5 * d;
+    var p = keplerPos(N, 5.1454, w, 60.2666, 0.054900, M);
+    var Ls = Ms + ws, Lm = M + w + N, D = Lm - Ls, F = Lm - N;
+    var lon = p.lon
+      - 1.274 * sinD(M - 2*D) + 0.658 * sinD(2*D) - 0.186 * sinD(Ms) - 0.059 * sinD(2*M - 2*D)
+      - 0.057 * sinD(M - 2*D + Ms) + 0.053 * sinD(M + 2*D) + 0.046 * sinD(2*D - Ms) + 0.041 * sinD(M - Ms)
+      - 0.035 * sinD(D) - 0.031 * sinD(M + Ms) - 0.015 * sinD(2*F - 2*D) + 0.011 * sinD(M - 4*D);
+    var lat = p.lat
+      - 0.173 * sinD(F - 2*D) - 0.055 * sinD(M - F - 2*D) - 0.046 * sinD(M + F - 2*D)
+      + 0.033 * sinD(F + 2*D) + 0.017 * sinD(2*M + F);
+    var r = p.r - 0.58 * cosD(M - 2*D) - 0.46 * cosD(2*D);
+    return eclToEq(lon, lat, r, jd);
+  }
+  /* Topocentric Moon: subtract the observer's own position (1 Earth radius,
+     along the local vertical) from the geocentric vector. latDeg/lstDeg place
+     the observer on the equatorial frame of date. Returns a unit vector plus
+     the distance in Earth radii. */
+  function moonTopo(jd, latDeg, lstDeg) {
+    var g = moonGeo(jd), cp = Math.cos(latDeg * D2R), l = lstDeg * D2R;
+    var v = [g[0] - cp * Math.cos(l), g[1] - cp * Math.sin(l), g[2] - Math.sin(latDeg * D2R)];
+    var r = Math.hypot(v[0], v[1], v[2]);
+    return { v: [v[0] / r, v[1] / r, v[2] / r], r: r };
+  }
+
+  var PLANETS = [
+    { n: 'Mercury', N: [48.3313, 3.24587e-5], i: [7.0047, 5.00e-8], w: [29.1241, 1.01444e-5], a: 0.387098, e: [0.205635, 5.59e-10], M: [168.6562, 4.0923344368], m0: -0.36, m1: 0.027 },
+    { n: 'Venus',   N: [76.6799, 2.46590e-5], i: [3.3946, 2.75e-8], w: [54.8910, 1.38374e-5], a: 0.723330, e: [0.006773, -1.302e-9], M: [48.0052, 1.6021302244], m0: -4.34, m1: 0.013 },
+    { n: 'Mars',    N: [49.5574, 2.11081e-5], i: [1.8497, -1.78e-8], w: [286.5016, 2.92961e-5], a: 1.523688, e: [0.093405, 2.516e-9], M: [18.6021, 0.5240207766], m0: -1.51, m1: 0.016 },
+    { n: 'Jupiter', N: [100.4542, 2.76854e-5], i: [1.3030, -1.557e-7], w: [273.8777, 1.64505e-5], a: 5.20256, e: [0.048498, 4.469e-9], M: [19.8950, 0.0830853001], m0: -9.25, m1: 0.014 },
+    { n: 'Saturn',  N: [113.6634, 2.38980e-5], i: [2.4886, -1.081e-7], w: [339.3939, 2.97661e-5], a: 9.55475, e: [0.055546, -9.499e-9], M: [316.9670, 0.0334442282], m0: -9.0, m1: 0.044 }
+  ];
+  /* Geocentric naked-eye planets, equatorial of date: unit vector, distance
+     (AU) and visual magnitude (Schlyter's phase formulae). */
+  function planetsEq(jd) {
+    var d = jd - 2451543.5;
+    var sun = keplerPos(0, 0, 282.9404 + 4.70935e-5 * d, 1, 0.016709 - 1.151e-9 * d, 356.0470 + 0.9856002585 * d);
+    var Mj = PLANETS[3].M[0] + PLANETS[3].M[1] * d, Ms = PLANETS[4].M[0] + PLANETS[4].M[1] * d;
+    var xs = sun.r * cosD(sun.lon), ys = sun.r * sinD(sun.lon);
+    return PLANETS.map(function (P, k) {
+      var p = keplerPos(P.N[0] + P.N[1] * d, P.i[0] + P.i[1] * d, P.w[0] + P.w[1] * d, P.a, P.e[0] + P.e[1] * d, P.M[0] + P.M[1] * d);
+      var lon = p.lon, lat = p.lat;
+      if (k === 3) {
+        lon += -0.332 * sinD(2*Mj - 5*Ms - 67.6) - 0.056 * sinD(2*Mj - 2*Ms + 21) + 0.042 * sinD(3*Mj - 5*Ms + 21)
+             - 0.036 * sinD(Mj - 2*Ms) + 0.022 * cosD(Mj - Ms) + 0.023 * sinD(2*Mj - 3*Ms + 52) - 0.016 * sinD(Mj - 5*Ms - 69);
+      } else if (k === 4) {
+        lon += 0.812 * sinD(2*Mj - 5*Ms - 67.6) - 0.229 * cosD(2*Mj - 4*Ms - 2) + 0.119 * sinD(Mj - 2*Ms - 3)
+             + 0.046 * sinD(2*Mj - 6*Ms - 69) + 0.014 * sinD(Mj - 3*Ms + 32);
+        lat += -0.020 * cosD(2*Mj - 4*Ms - 2) + 0.018 * sinD(2*Mj - 6*Ms - 49);
+      }
+      var xh = p.r * cosD(lon) * cosD(lat), yh = p.r * sinD(lon) * cosD(lat), zh = p.r * sinD(lat);
+      var xg = xh + xs, yg = yh + ys, zg = zh;
+      var R = Math.hypot(xg, yg, zg);
+      var FV = Math.acos(Math.max(-1, Math.min(1, (p.r * p.r + R * R - sun.r * sun.r) / (2 * p.r * R)))) * R2D;
+      var mag = P.m0 + 5 * Math.log10(p.r * R) + P.m1 * FV;
+      if (k === 0) mag += 2.2e-13 * Math.pow(FV, 6);
+      if (k === 1) mag += 4.2e-7 * Math.pow(FV, 3);
+      if (k === 4) {
+        var los = Math.atan2(yg, xg) * R2D, las = Math.atan2(zg, Math.hypot(xg, yg)) * R2D;
+        var B = Math.asin(sinD(las) * cosD(28.06) - cosD(las) * sinD(28.06) * sinD(los - 169.51 - 3.82e-5 * d));
+        mag += -2.6 * Math.abs(Math.sin(B)) + 1.2 * Math.sin(B) * Math.sin(B);
+      }
+      var v = eclToEq(Math.atan2(yg, xg) * R2D, Math.atan2(zg, Math.hypot(xg, yg)) * R2D, 1, jd);
+      return { n: P.n, v: v, R: R, mag: mag };
+    });
+  }
+
+  /* ENU basis for the equatorial frame of date: 'longitude' is the local
+     sidereal time, so a star's unit vector dotted with it gives its direction
+     in the observer's east/north/up frame. */
+  function skyBasis(latDeg, lonDeg, jd) { return enuBasis(latDeg, gmstDeg(jd) + lonDeg); }
+
   /* ----------------------------------------------------------- self-test --- */
   function runSelfTest() {
     var res = [];
@@ -510,6 +772,65 @@ var Antipode = (function () {
       T('destPoint: 180° due north of NY = antipode',
         Math.abs(dp[0] - ap[0]) < 1e-6 && Math.abs(normLon(dp[1] - ap[1])) < 1e-6,
         dp[0].toFixed(4) + ', ' + dp[1].toFixed(4));
+
+      /* sky data */
+      var st = decodeStars(STAR_DATA), sbad = 0, sorted = true, bright = 0;
+      for (var si = 0; si < st.n; si++) {
+        if (!(st.ra[si] >= 0 && st.ra[si] < 360 && st.dec[si] >= -90 && st.dec[si] <= 90 &&
+              st.mag[si] >= -1.5 && st.mag[si] <= 7)) sbad++;
+        if (si && st.ra[si] < st.ra[si-1]) sorted = false;
+        if (st.mag[si] < st.mag[bright]) bright = si;
+      }
+      T('star catalogue decode', st.n >= 5000 && sbad === 0 && sorted,
+        st.n + ' stars, ' + sbad + ' out of range' + (sorted ? '' : ', not sorted'));
+      T('brightest star is Sirius (RA 101.3°, Dec −16.7°)',
+        Math.abs(st.ra[bright] - 101.29) < 0.05 && Math.abs(st.dec[bright] + 16.72) < 0.05,
+        'mag ' + st.mag[bright].toFixed(2) + ' at ' + st.ra[bright].toFixed(2) + ', ' + st.dec[bright].toFixed(2));
+      var figs = decodeFigures(CONST_DATA), fbad = 0, segs = 0;
+      figs.forEach(function (f) {
+        f.chains.forEach(function (ch) {
+          segs += ch.length - 1;
+          ch.forEach(function (ix) { if (!(ix >= 0 && ix < st.n)) fbad++; });
+        });
+      });
+      T('constellation figures reference the catalogue', figs.length === 88 && segs >= 600 && fbad === 0,
+        figs.length + ' constellations, ' + segs + ' segments, ' + fbad + ' bad indices');
+
+      var rings = landRings(decodeCoast(COAST_DATA)), unclosed = 0, polar = 0;
+      rings.forEach(function (r) {
+        var a = r[0], b = r[r.length - 1];
+        if (a[0] !== b[0] || a[1] !== b[1]) unclosed++;
+        r.forEach(function (p) { if (p[1] === -90) polar++; });
+      });
+      T('land rings close (Antarctica through the pole)', unclosed === 0 && polar === 2,
+        rings.length + ' rings, ' + unclosed + ' open, ' + polar + ' pole vertices');
+
+      /* ephemeris, against Meeus's and Schlyter's worked examples */
+      var gm = gmstDeg(jdFromMs(Date.UTC(1987, 3, 10)));
+      T('sidereal time (Meeus 12.a)', Math.abs(gm - 197.693195) < 1e-4, gm.toFixed(6) + '°');
+      var su = sunEq(2448908.5);
+      T('Sun (Meeus 25.a)', Math.abs(su.ra - 198.38083) < 0.01 && Math.abs(su.dec + 7.78507) < 0.005,
+        su.ra.toFixed(4) + ', ' + su.dec.toFixed(4));
+      var jd90 = jdFromMs(Date.UTC(1990, 3, 19));
+      var mg = eqFromVec(moonGeo(jd90)), mt = eqFromVec(moonTopo(jd90, 60, 221.8388).v);
+      T('Moon (Schlyter 1990-04-19)',
+        Math.abs(mg.ra - 309.5011) < 0.02 && Math.abs(mg.dec + 19.1032) < 0.02 &&
+        Math.abs(mt.ra - 310.0017) < 0.03 && Math.abs(mt.dec + 19.8790) < 0.03,
+        'geocentric ' + mg.ra.toFixed(3) + ', ' + mg.dec.toFixed(3) + ' · topocentric ' + mt.ra.toFixed(3) + ', ' + mt.dec.toFixed(3));
+      var me = eqFromVec(planetsEq(jd90)[0].v);
+      T('Mercury (Schlyter 1990-04-19)', Math.abs(me.ra - 43.2598) < 0.02 && Math.abs(me.dec - 19.6460) < 0.02,
+        me.ra.toFixed(4) + ', ' + me.dec.toFixed(4));
+      var P = precessMat(2451545 + 36525), pol = -1;
+      for (var pi = 0; pi < st.n; pi++) if (st.dec[pi] > 89 && (pol < 0 || st.mag[pi] < st.mag[pol])) pol = pi;
+      var pv = [P[6], P[7], P[8]];     // the 2100 pole in catalogue coordinates
+      var pr = st.ra[pol] * D2R, pd = st.dec[pol] * D2R;
+      var dPol = Math.acos(Math.cos(pd) * Math.cos(pr) * pv[0] + Math.cos(pd) * Math.sin(pr) * pv[1] + Math.sin(pd) * pv[2]) * R2D;
+      T('precession: the pole of 2100 closes in on Polaris', Math.acos(P[8]) * R2D > 0.55 && dPol < 0.5 && dPol > 0.4,
+        'Polaris ' + (90 - st.dec[pol]).toFixed(2) + '° from the 2000 pole, ' + dPol.toFixed(2) + '° from the 2100 pole');
+      var sb = skyBasis(NY[0], NY[1], jd90);
+      T('celestial pole stands at altitude = latitude, due north',
+        Math.abs(sb.uz - Math.sin(NY[0] * D2R)) < 1e-9 && Math.abs(sb.nz - Math.cos(NY[0] * D2R)) < 1e-9 && Math.abs(sb.ez) < 1e-9,
+        'altitude ' + (Math.asin(sb.uz) * R2D).toFixed(4) + '°');
     } catch (err) {
       T('self-test crashed', false, String(err && err.stack || err));
     }
@@ -523,6 +844,11 @@ var Antipode = (function () {
     normLon: normLon, antipodeOf: antipodeOf, gcDistDeg: gcDistDeg, destPoint: destPoint,
     qMul: qMul, qNorm: qNorm, qAxisZ: qAxisZ, qFromEuler: qFromEuler,
     qSlerp: qSlerp, qToMat: qToMat, w3cMat: w3cMat, headingOfMat: headingOfMat,
+    STAR_DATA: STAR_DATA, CONST_DATA: CONST_DATA, decodeUints: decodeUints,
+    decodeStars: decodeStars, decodeFigures: decodeFigures, starVectors: starVectors, landRings: landRings,
+    jdFromMs: jdFromMs, gmstDeg: gmstDeg, obliquityDeg: obliquityDeg, precessMat: precessMat,
+    mat3Mul: mat3Mul, mat3Vec: mat3Vec, eqFromVec: eqFromVec, sunEq: sunEq, moonGeo: moonGeo,
+    moonTopo: moonTopo, planetsEq: planetsEq, PLANETS: PLANETS, skyBasis: skyBasis,
     runSelfTest: runSelfTest
   };
 })();
@@ -547,7 +873,8 @@ var S = {
   view: 'window',               // 'window' (pane geometry) | 'ar' (overlay on the lens image)
   scr: { pxPerMm: null, src: '', name: '' },     // physical screen scale, CSS px per mm
   eye: { ex: 0, ey: 0, ez: 0.40, src: 'assumed' },  // metres, pane frame (x right, y up, z to viewer)
-  bg: 'camera',
+  bg: 'space',                  // 'space' (stars + sunlit land) | 'camera' | 'black'
+  sky: { lines: true, names: true, clockH: 0 },   // clockH: hours added to the device clock
   lens: { vfov: 68, src: 'estimated' },           // degrees across the camera image's long side
   face: { lm: null, stream: null, run: false, samples: [] },
   frozen: false,
@@ -759,6 +1086,300 @@ function syncViewUi() {
   syncVideoZoom();
 }
 
+
+/* -------------------------------------------------------------- the sky ---
+   What lies beyond the far side, drawn by WebGL under the 2D overlay: the
+   real stars (Hipparcos, precessed to today), the figures, Sun, Moon and
+   planets, then the far side's land as a grey crust lit by the Sun. Each
+   frame rotates catalogue vectors by one matrix (catalogue -> equator of
+   date -> ENU -> device) and the vertex shader applies the same pinhole as
+   projectLine, with w = -z so GL clips what is behind the eye. The land is a
+   full-screen pass: pixel -> ray -> far-side point -> land mask + daylight. */
+var STARS = A.decodeStars(A.STAR_DATA);
+var FIGS = A.decodeFigures(A.CONST_DATA);
+var STAR_XYZ = A.starVectors(STARS);
+var SUN_TAN = 0.004652, MOON_RADIUS_ER = 0.2727;    // tan(0.2666 deg); lunar radius in Earth radii
+var PLANET_COL = [3, 2, 6, 3, 4];
+var STAR_PAL = [0.62,0.72,1.0, 0.78,0.85,1.0, 0.95,0.96,1.0, 1.0,0.97,0.88,
+                1.0,0.93,0.76, 1.0,0.85,0.62, 1.0,0.75,0.50, 1.0,0.65,0.42];
+
+var SKY_VS = [
+  'precision highp float;',
+  'attribute vec3 aPos; attribute float aMag; attribute float aCol;',
+  'uniform mat3 uM; uniform vec4 uProj; uniform float uDpr, uF, uMaxPt; uniform vec3 uPal[8];',
+  'varying vec4 vCol; varying vec3 vInfo;',   // (radius css px, sprite size css px, kind)
+  'void main() {',
+  '  vec3 v = uM * aPos; float w = -v.z;',
+  '  gl_Position = vec4(uProj.x * w + uProj.y * v.x, uProj.z * w + uProj.w * v.y, -0.02, w);',
+  '  float kind = aCol < 8.0 ? 0.0 : aCol - 8.0;',   // 0 star or planet, 1 Sun, 2 Moon
+  '  float r, s;',
+  '  if (kind == 0.0) {',
+  '    r = clamp(2.5 - 0.38 * aMag, 0.5, 4.5); s = 2.0 * r + 3.0;',
+  '    vec3 c = uPal[int(aCol)];',
+  '    vCol = vec4(mix(c, vec3(1.0), clamp((aMag - 1.0) * 0.18, 0.0, 0.7)), clamp(1.3 - 0.13 * aMag, 0.3, 1.0));',
+  '  } else {',
+  '    r = max(uF * aMag, 2.0);',                     // for bodies aMag carries tan(angular radius)
+  '    s = kind == 1.0 ? 6.0 * r : 2.0 * r + 3.0;',
+  '    vCol = kind == 1.0 ? vec4(1.0, 0.97, 0.88, 1.0) : vec4(0.86, 0.86, 0.82, 1.0);',
+  '  }',
+  '  float px = min(s * uDpr, uMaxPt);',
+  '  gl_PointSize = px; vInfo = vec3(r, px / uDpr, kind);',
+  '}'].join('\n');
+var SKY_FS_POINTS = [
+  'precision mediump float;',
+  'uniform vec3 uSunDev; varying vec4 vCol; varying vec3 vInfo;',
+  'void main() {',
+  '  vec2 p = (gl_PointCoord - 0.5) * vInfo.y; float d = length(p), r = vInfo.x, a;',
+  '  if (vInfo.z == 1.0) {',                           // Sun: disc plus glow
+  '    a = min(1.0, smoothstep(r + 0.8, r - 0.5, d) + 0.45 * exp(-d * d / (2.5 * r * r)) * step(r, d));',
+  '  } else if (vInfo.z == 2.0) {',                    // Moon: a sphere lit by the Sun, so the phase is right
+  '    vec2 q = vec2(p.x, -p.y) / max(r, 0.001); float q2 = min(dot(q, q), 1.0);',
+  '    float lit = 0.05 + 0.95 * max(dot(vec3(q, sqrt(1.0 - q2)), uSunDev), 0.0);',
+  '    a = smoothstep(r + 0.8, r - 0.3, d);',
+  '    gl_FragColor = vec4(vCol.rgb * lit * a, a); return;',
+  '  } else {',
+  '    a = vCol.a * smoothstep(r + 0.75, max(r - 0.35, 0.0), d);',
+  '  }',
+  '  gl_FragColor = vec4(vCol.rgb * a, a);',
+  '}'].join('\n');
+var SKY_FS_LINES = 'precision mediump float; uniform vec4 uCol; void main() { gl_FragColor = vec4(uCol.rgb * uCol.a, uCol.a); }';
+var EARTH_VS = 'attribute vec2 aXY; void main() { gl_Position = vec4(aXY, 0.0, 1.0); }';
+var EARTH_FS = [
+  'precision highp float;',
+  'uniform vec2 uSize; uniform float uDpr; uniform vec3 uProjF;',   // canvas px; (F, cx, cy) css px
+  'uniform mat3 uDevToEnu; uniform vec3 uE, uN, uU, uSun; uniform sampler2D uLand;',
+  'void main() {',
+  '  vec2 px = gl_FragCoord.xy / uDpr;',
+  '  vec3 dv = normalize(vec3((px.x - uProjF.y) / uProjF.x, -((uSize.y / uDpr - px.y) - uProjF.z) / uProjF.x, -1.0));',
+  '  vec3 d = uDevToEnu * dv;',
+  '  if (d.z >= 0.0) discard;',                        // above the horizon: sky only
+  /* far-side point: Theta = 2 nu, so cos Theta = 2 cos^2 nu - 1 with cos nu = -d.z */
+  '  vec3 f = (1.0 - 2.0 * d.z * d.z) * uU - 2.0 * d.z * (d.x * uE + d.y * uN);',
+  '  float lat = asin(clamp(f.z, -1.0, 1.0)), lon = atan(f.y, f.x);',
+  '  float land = smoothstep(0.4, 0.6, texture2D(uLand, vec2(lon / 6.2831853 + 0.5, 0.5 - lat / 3.14159265)).r);',
+  '  float cosZ = dot(f, uSun);',
+  '  float day = smoothstep(-0.06, 0.20, cosZ);',       // twilight band around the terminator
+  '  float lit = 0.2 + 0.8 * day * (0.45 + 0.55 * max(cosZ, 0.0));',
+  '  vec3 landCol = vec3(0.56, 0.565, 0.58) * lit;',
+  '  float seaA = 0.35 * day; vec3 seaCol = vec3(0.05, 0.09, 0.16) * seaA;',   // day-side sea: a faint tint, stars show through
+  '  gl_FragColor = vec4(mix(seaCol, landCol, land), mix(seaA, 1.0, land));',
+  '}'].join('\n');
+
+var sky = { ok: false, gl: null, drawn: false, ephT: -1e9, ephLat: null, ephLon: null, labels: [], Mdate: null, Mcat: null };
+(function initSky() {
+  var c = $('sky'), g;
+  try {
+    g = c.getContext('webgl', { alpha: true, antialias: true, depth: false, stencil: false, premultipliedAlpha: true });
+  } catch (e) { g = null; }
+  if (!g) return;
+  function shader(type, src) {
+    var sh = g.createShader(type); g.shaderSource(sh, src); g.compileShader(sh);
+    if (!g.getShaderParameter(sh, g.COMPILE_STATUS)) throw new Error(g.getShaderInfoLog(sh));
+    return sh;
+  }
+  function program(vs, fs) {
+    var pr = g.createProgram();
+    g.attachShader(pr, shader(g.VERTEX_SHADER, vs)); g.attachShader(pr, shader(g.FRAGMENT_SHADER, fs));
+    g.linkProgram(pr);
+    if (!g.getProgramParameter(pr, g.LINK_STATUS)) throw new Error(g.getProgramInfoLog(pr));
+    var u = {}, a = {}, n = g.getProgramParameter(pr, g.ACTIVE_UNIFORMS), i;
+    for (i = 0; i < n; i++) { var nm = g.getActiveUniform(pr, i).name.replace(/\[0\]$/, ''); u[nm] = g.getUniformLocation(pr, nm); }
+    n = g.getProgramParameter(pr, g.ACTIVE_ATTRIBUTES);
+    for (i = 0; i < n; i++) { var an = g.getActiveAttrib(pr, i).name; a[an] = g.getAttribLocation(pr, an); }
+    return { p: pr, u: u, a: a };
+  }
+  try {
+    sky.points = program(SKY_VS, SKY_FS_POINTS);
+    sky.lines = program(SKY_VS, SKY_FS_LINES);
+    sky.earth = program(EARTH_VS, EARTH_FS);
+
+    /* stars: interleaved x y z mag colour */
+    var sa = new Float32Array(STARS.n * 5);
+    for (var i = 0; i < STARS.n; i++) {
+      sa[i*5] = STAR_XYZ[i*3]; sa[i*5+1] = STAR_XYZ[i*3+1]; sa[i*5+2] = STAR_XYZ[i*3+2];
+      sa[i*5+3] = STARS.mag[i]; sa[i*5+4] = STARS.col[i];
+    }
+    sky.starBuf = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, sky.starBuf); g.bufferData(g.ARRAY_BUFFER, sa, g.STATIC_DRAW);
+    var idx = [];
+    FIGS.forEach(function (f) {
+      f.chains.forEach(function (ch) { for (var k = 1; k < ch.length; k++) idx.push(ch[k-1], ch[k]); });
+    });
+    sky.lineBuf = g.createBuffer(); g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, sky.lineBuf);
+    g.bufferData(g.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), g.STATIC_DRAW);
+    sky.nLineIdx = idx.length;
+    sky.bodyArr = new Float32Array(7 * 5);
+    sky.bodyBuf = g.createBuffer();
+    sky.quadBuf = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, sky.quadBuf);
+    g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), g.STATIC_DRAW);
+
+    /* land mask: the coastline rings filled in an equirectangular raster */
+    var size = Math.min(4096, g.getParameter(g.MAX_TEXTURE_SIZE));
+    var mc = document.createElement('canvas'); mc.width = size; mc.height = size / 2;
+    var m2 = mc.getContext('2d');
+    m2.fillStyle = '#000'; m2.fillRect(0, 0, mc.width, mc.height);
+    m2.fillStyle = '#fff'; m2.beginPath();
+    A.landRings(A.decodeCoast(A.COAST_DATA)).forEach(function (ring) {
+      for (var k = 0; k < ring.length; k++) {
+        var x = (ring[k][0] + 180) / 360 * mc.width, y = (90 - ring[k][1]) / 180 * mc.height;
+        if (k) m2.lineTo(x, y); else m2.moveTo(x, y);
+      }
+      m2.closePath();
+    });
+    m2.fill('evenodd');
+    sky.landTex = g.createTexture(); g.bindTexture(g.TEXTURE_2D, sky.landTex);
+    g.texImage2D(g.TEXTURE_2D, 0, g.LUMINANCE, g.LUMINANCE, g.UNSIGNED_BYTE, mc);
+    g.texParameteri(g.TEXTURE_2D, g.TEXTURE_MIN_FILTER, g.LINEAR); g.texParameteri(g.TEXTURE_2D, g.TEXTURE_MAG_FILTER, g.LINEAR);
+    g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_S, g.REPEAT); g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_T, g.CLAMP_TO_EDGE);
+    var lc = document.createElement('canvas'); lc.width = 1024; lc.height = 512;
+    var l2 = lc.getContext('2d'); l2.drawImage(mc, 0, 0, lc.width, lc.height);
+    sky.mask = { w: lc.width, h: lc.height, d: l2.getImageData(0, 0, lc.width, lc.height).data };
+
+    sky.maxPt = g.getParameter(g.ALIASED_POINT_SIZE_RANGE)[1];
+    sky.P = A.precessMat(A.jdFromMs(Date.now()));
+    sky.figCenter = FIGS.map(function (f) {
+      var v = [0, 0, 0], seen = {};
+      f.chains.forEach(function (ch) { ch.forEach(function (ix) {
+        if (seen[ix]) return; seen[ix] = true;
+        v[0] += STAR_XYZ[ix*3]; v[1] += STAR_XYZ[ix*3+1]; v[2] += STAR_XYZ[ix*3+2];
+      }); });
+      var L = Math.hypot(v[0], v[1], v[2]) || 1;
+      return [v[0] / L, v[1] / L, v[2] / L];
+    });
+    g.clearColor(0, 0, 0, 0);
+    sky.gl = g; sky.ok = true;
+  } catch (e) {
+    sky.ok = false;
+  }
+})();
+
+function colMajor(M) { return [M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]]; }
+function skyJd() { return A.jdFromMs(Date.now() + S.sky.clockH * 3600000); }
+
+/* Sun, Moon and planets at a few Hz; the body buffer carries, per body,
+   (unit vector of date, size, kind): size is the magnitude for planets and
+   tan(angular radius) for the two discs. */
+function updateEphemeris(jd, t) {
+  sky.ephT = t; sky.ephLat = S.lat; sky.ephLon = S.lon;
+  var gm = A.gmstDeg(jd), su = A.sunEq(jd), sr = su.ra * D2R, sd = su.dec * D2R, sl = (su.ra - gm) * D2R;
+  sky.sunEq = [Math.cos(sd) * Math.cos(sr), Math.cos(sd) * Math.sin(sr), Math.sin(sd)];
+  sky.sunEcef = [Math.cos(sd) * Math.cos(sl), Math.cos(sd) * Math.sin(sl), Math.sin(sd)];
+  sky.subsolar = [su.dec, A.normLon(su.ra - gm)];
+  var mo = A.moonTopo(jd, S.lat, gm + S.lon), pl = A.planetsEq(jd), b = sky.bodyArr;
+  function put(i, v, size, kind) { b[i*5] = v[0]; b[i*5+1] = v[1]; b[i*5+2] = v[2]; b[i*5+3] = size; b[i*5+4] = kind; }
+  put(0, sky.sunEq, SUN_TAN, 9);
+  put(1, mo.v, MOON_RADIUS_ER / mo.r, 10);
+  sky.labels = [{ n: 'Sun', v: sky.sunEq, c: '#ffe9a8', t: SUN_TAN }, { n: 'Moon', v: mo.v, c: '#e8e8e0', t: MOON_RADIUS_ER / mo.r }];
+  pl.forEach(function (p, i) {
+    put(2 + i, p.v, p.mag, PLANET_COL[i]);
+    sky.labels.push({ n: p.n, v: p.v, c: '#dfe9f0', t: 0 });
+  });
+  var g = sky.gl;
+  g.bindBuffer(g.ARRAY_BUFFER, sky.bodyBuf); g.bufferData(g.ARRAY_BUFFER, b, g.DYNAMIC_DRAW);
+}
+
+function bindSkyAttribs(pr, buf) {
+  var g = sky.gl;
+  g.bindBuffer(g.ARRAY_BUFFER, buf);
+  g.enableVertexAttribArray(pr.a.aPos); g.vertexAttribPointer(pr.a.aPos, 3, g.FLOAT, false, 20, 0);
+  if (pr.a.aMag >= 0) { g.enableVertexAttribArray(pr.a.aMag); g.vertexAttribPointer(pr.a.aMag, 1, g.FLOAT, false, 20, 12); }
+  if (pr.a.aCol >= 0) { g.enableVertexAttribArray(pr.a.aCol); g.vertexAttribPointer(pr.a.aCol, 1, g.FLOAT, false, 20, 16); }
+}
+function setSkyUniforms(pr, M, proj, F) {
+  var g = sky.gl;
+  g.uniformMatrix3fv(pr.u.uM, false, colMajor(M));
+  g.uniform4fv(pr.u.uProj, proj);
+  if (pr.u.uDpr) g.uniform1f(pr.u.uDpr, sky.dpr);
+  if (pr.u.uF) g.uniform1f(pr.u.uF, F);
+  if (pr.u.uMaxPt) g.uniform1f(pr.u.uMaxPt, sky.maxPt);
+  if (pr.u.uPal) g.uniform3fv(pr.u.uPal, STAR_PAL);
+}
+
+function drawSky(m, vp, t) {
+  var g = sky.gl;
+  if (!g) return;
+  if (S.bg !== 'space' || S.lat == null) {
+    if (sky.drawn) { g.clear(g.COLOR_BUFFER_BIT); sky.drawn = false; }
+    sky.Mdate = null;
+    return;
+  }
+  sky.drawn = true;
+  var jd = skyJd();
+  if (t - sky.ephT > 250 || sky.ephLat !== S.lat || sky.ephLon !== S.lon) updateEphemeris(jd, t);
+  var B = A.enuBasis(S.lat, A.gmstDeg(jd) + S.lon);
+  var Bm = [B.ex, B.ey, B.ez, B.nx, B.ny, B.nz, B.ux, B.uy, B.uz];
+  var mT = [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+  sky.Mdate = A.mat3Mul(mT, Bm);                 // equator of date -> device
+  sky.Mcat = A.mat3Mul(sky.Mdate, sky.P);        // catalogue (ICRS) -> device
+  var proj = [2 * vp.cx / W - 1, 2 * vp.F / W, 1 - 2 * vp.cy / H, 2 * vp.F / H];
+  var c = $('sky');
+  g.viewport(0, 0, c.width, c.height);
+  g.clear(g.COLOR_BUFFER_BIT);
+  g.enable(g.BLEND); g.blendFunc(g.ONE, g.ONE_MINUS_SRC_ALPHA);
+
+  if (S.sky.lines) {
+    var pl = sky.lines;
+    g.useProgram(pl.p); setSkyUniforms(pl, sky.Mcat, proj, vp.F);
+    g.uniform4f(pl.u.uCol, 0.55, 0.68, 0.9, 0.32);
+    bindSkyAttribs(pl, sky.starBuf);
+    g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, sky.lineBuf);
+    g.drawElements(g.LINES, sky.nLineIdx, g.UNSIGNED_SHORT, 0);
+  }
+  var pp = sky.points;
+  g.useProgram(pp.p); setSkyUniforms(pp, sky.Mcat, proj, vp.F);
+  var sdv = A.mat3Vec(sky.Mdate, sky.sunEq);
+  g.uniform3f(pp.u.uSunDev, sdv[0], sdv[1], sdv[2]);
+  bindSkyAttribs(pp, sky.starBuf);
+  g.drawArrays(g.POINTS, 0, STARS.n);
+  g.uniformMatrix3fv(pp.u.uM, false, colMajor(sky.Mdate));
+  bindSkyAttribs(pp, sky.bodyBuf);
+  g.drawArrays(g.POINTS, 0, 7);
+
+  var pe = sky.earth, E = sky.E = A.enuBasis(S.lat, S.lon);
+  g.useProgram(pe.p);
+  g.uniform2f(pe.u.uSize, c.width, c.height); g.uniform1f(pe.u.uDpr, sky.dpr);
+  g.uniform3f(pe.u.uProjF, vp.F, vp.cx, vp.cy);
+  g.uniformMatrix3fv(pe.u.uDevToEnu, false, colMajor(m));
+  g.uniform3f(pe.u.uE, E.ex, E.ey, E.ez); g.uniform3f(pe.u.uN, E.nx, E.ny, E.nz); g.uniform3f(pe.u.uU, E.ux, E.uy, E.uz);
+  g.uniform3f(pe.u.uSun, sky.sunEcef[0], sky.sunEcef[1], sky.sunEcef[2]);
+  g.activeTexture(g.TEXTURE0); g.bindTexture(g.TEXTURE_2D, sky.landTex); g.uniform1i(pe.u.uLand, 0);
+  g.bindBuffer(g.ARRAY_BUFFER, sky.quadBuf);
+  g.enableVertexAttribArray(pe.a.aXY); g.vertexAttribPointer(pe.a.aXY, 2, g.FLOAT, false, 0, 0);
+  g.drawArrays(g.TRIANGLES, 0, 3);
+}
+
+/* Is this device-frame direction blocked by the far side's land? (Same
+   mapping as the Earth shader, on a coarse copy of the mask.) */
+function behindLand(m, x, y, z) {
+  var dx = m[0]*x + m[1]*y + m[2]*z, dy = m[3]*x + m[4]*y + m[5]*z, dz = m[6]*x + m[7]*y + m[8]*z;   // ENU
+  if (dz >= 0) return false;
+  var E = sky.E, fz = (1 - 2*dz*dz) * E.uz - 2*dz*(dx*E.ez + dy*E.nz);
+  var fx = (1 - 2*dz*dz) * E.ux - 2*dz*(dx*E.ex + dy*E.nx), fy = (1 - 2*dz*dz) * E.uy - 2*dz*(dx*E.ey + dy*E.ny);
+  var lat = Math.asin(clamp(fz, -1, 1)) * R2D, lon = Math.atan2(fy, fx) * R2D;
+  var px = Math.floor((lon + 180) / 360 * sky.mask.w) % sky.mask.w, py = clamp(Math.floor((90 - lat) / 180 * sky.mask.h), 0, sky.mask.h - 1);
+  return sky.mask.d[(py * sky.mask.w + px) * 4] > 127;
+}
+/* Names on the 2D overlay: figures at the mean of their stars, bodies beside
+   their disc; nothing for what the crust hides. */
+function drawSkyLabels(m, F, cx, cy) {
+  if (!sky.Mdate) return;
+  function at(M, v) {
+    var x = M[0]*v[0] + M[1]*v[1] + M[2]*v[2], y = M[3]*v[0] + M[4]*v[1] + M[5]*v[2], z = M[6]*v[0] + M[7]*v[1] + M[8]*v[2];
+    if (z > -0.02 || behindLand(m, x, y, z)) return null;
+    var sx = cx + x * F / -z, sy = cy - y * F / -z;
+    return (sx < -40 || sx > W + 40 || sy < -20 || sy > H + 20) ? null : { x: sx, y: sy };
+  }
+  if (S.sky.names) {
+    for (var i = 0; i < FIGS.length; i++) {
+      var p = at(sky.Mcat, sky.figCenter[i]);
+      if (p) haloText(FIGS[i].name, p.x, p.y, 'rgba(170,190,225,0.6)', 'center');
+    }
+  }
+  for (var k = 0; k < sky.labels.length; k++) {
+    var q = at(sky.Mdate, sky.labels[k].v);
+    if (q) haloText(sky.labels[k].n, q.x + 6 + F * sky.labels[k].t, q.y - 7, sky.labels[k].c);
+  }
+}
+
 /* ------------------------------------------------------------ rendering --- */
 function resize() {
   var dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -766,6 +1387,9 @@ function resize() {
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   cv.style.width = W + 'px'; cv.style.height = H + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  var sc = $('sky');
+  sc.width = cv.width; sc.height = cv.height; sc.style.width = W + 'px'; sc.style.height = H + 'px';
+  sky.dpr = dpr;
   syncVideoZoom();
 }
 window.addEventListener('resize', resize);
@@ -815,6 +1439,7 @@ var lastHud = 0;
 function render(t) {
   ctx.clearRect(0, 0, W, H);
   if (!S.qS) {
+    if (sky.gl && sky.drawn) { sky.gl.clear(sky.gl.COLOR_BUFFER_BIT); sky.drawn = false; }
     haloText(S.started ? 'waiting for orientation…' : '', W/2, H/2 + 40, '#9fb8cc', 'center');
     return;
   }
@@ -822,6 +1447,7 @@ function render(t) {
   var m = A.qToMat(q);
   var vp = viewParams();
   var F = vp.F, cx = vp.cx, cy = vp.cy;
+  drawSky(m, vp, t);
 
   // Theta rings (the 10° and 20° rings matter in the narrow window view)
   ctx.lineWidth = 1;
@@ -853,6 +1479,7 @@ function render(t) {
     for (var i = 0; i < S.dirs.length; i++) projectLine(S.dirs[i], m, F, cx, cy, false);
     ctx.stroke();
   }
+  if (S.bg === 'space') drawSkyLabels(m, F, cx, cy);
 
   // cities
   if (S.cityDirs) {
@@ -931,6 +1558,13 @@ function updateHud(m) {
       rs.textContent = 'set location (⚙) to draw coastlines';
     }
   }
+  var sc = $('chipSun');
+  if (sky.ok && S.bg === 'space' && sky.Mdate && S.lat != null) {
+    var sB = A.enuBasis(S.lat, A.gmstDeg(skyJd()) + S.lon), se = sky.sunEq;
+    var alt = Math.asin(clamp(se[0]*sB.ux + se[1]*sB.uy + se[2]*sB.uz, -1, 1)) * R2D;
+    sc.textContent = 'sun: ' + Math.abs(alt).toFixed(0) + '° ' + (alt < 0 ? 'below' : 'above') + ' your horizon · over ' +
+      fmtLL(sky.subsolar[0], sky.subsolar[1]);
+  } else sc.textContent = 'sun: –';
   var hc = $('chipHead');
   if (S.mode === 'compass')
     hc.textContent = 'compass' + (S.compAcc != null ? ' ±' + Math.round(S.compAcc) + '°' : '') +
@@ -985,6 +1619,17 @@ $('setupBtn').addEventListener('click', function () {
 $('opacity').addEventListener('input', function () {
   video.style.opacity = this.value / 100; $('opVal').textContent = this.value + '%';
 });
+$('bgSel').addEventListener('change', function () { setBg(this.value); if (S.started) applyBackground(); });
+$('skyLines').addEventListener('change', function () { S.sky.lines = this.checked; store('skyLines', this.checked); });
+$('skyNames').addEventListener('change', function () { S.sky.names = this.checked; store('skyNames', this.checked); });
+$('clock').addEventListener('input', function () { S.sky.clockH = +this.value; syncClockUi(); });
+$('clockNow').addEventListener('click', function () { S.sky.clockH = 0; $('clock').value = 0; syncClockUi(); });
+function syncClockUi() {
+  var h = S.sky.clockH, d = new Date(Date.now() + h * 3600000);
+  $('clockVal').textContent = h ? (h > 0 ? '+' : '−') + Math.abs(h) + ' h' : 'now';
+  $('clockInfo').textContent = 'Daylight on the far side follows this clock: ' + d.toUTCString().replace(/:\d\d GMT$/, ' UTC') +
+    (h ? '' : ' (the device clock)') + '. Slide it to watch the terminator sweep.';
+}
 $('trim').addEventListener('input', function () {
   S.trim = +this.value; $('trimVal').textContent = this.value + '°';
 });
@@ -1116,30 +1761,43 @@ function setView(v) {
   $('arOpts').classList.toggle('hidden', v !== 'ar');
   $('lensStatus').textContent = 'Lens field of view: ' + Math.round(S.lens.vfov) + '° across the long side of the ' +
     'image (' + S.lens.src + '). Change it under ⚙ if you know your lens.';
+  syncEyeUi();
 }
 $('modeWin').addEventListener('click', function () { setView('window'); });
 $('modeAr').addEventListener('click', function () { setView('ar'); });
 $('eyeSrc').addEventListener('change', syncEyeUi);
-$('bgSrc').addEventListener('change', syncEyeUi);
+$('bgSrc').addEventListener('change', function () { setBg(this.value); });
+function setBg(v) {
+  S.bg = v; store('bg2', v);
+  $('bgSrc').value = v; $('bgSel').value = v;
+  $('opRow').classList.toggle('hidden', v !== 'camera');
+  $('skyRow').classList.toggle('hidden', v !== 'space');
+  $('clockRow').classList.toggle('hidden', v !== 'space');
+  $('clockInfo').classList.toggle('hidden', v !== 'space');
+  syncEyeUi();
+}
 $('eyeCm').addEventListener('change', function () {
   var v = parseFloat(this.value);
   if (v >= 10 && v <= 150) { S.eye.ez = v / 100; S.eye.src = 'assumed'; store('eyeCm', v); }
   syncEyeUi();
 });
 function syncEyeUi() {
-  var face = $('eyeSrc').value === 'face', cam = $('bgSrc').value === 'camera';
+  var face = $('eyeSrc').value === 'face', cam = S.bg === 'camera';
   $('eyeCm').classList.toggle('hidden', face);
-  S.bg = cam ? 'camera' : 'black'; store('bg', S.bg);
   $('eyeStatus').textContent = face
     ? (cam ? 'The front camera measures your eye distance for ~2 s at start, then hands over to the rear ' +
              'camera (phones allow one camera at a time), so hold the same distance.'
            : 'Head tracking stays live: moving your head shifts the view through the pane (parallax).')
     : 'Hold the phone about ' + $('eyeCm').value + ' cm (' + Math.round($('eyeCm').value / 2.54) + ' in) from your eyes. ' +
       'Only this distance and the screen size set the view; where you stand does not matter.';
-  $('bgStatus').textContent = cam
+  $('bgStatus').textContent = S.bg === 'space'
+    ? 'The real sky in the direction you point, as if the Earth were glass: the far side\'s land drawn as a grey crust, ' +
+      'lit where it is daytime there, with the stars, Sun, Moon and planets showing through the sea.' +
+      (sky.ok ? '' : ' (WebGL is unavailable here, so the background will be black.)')
+    : cam && S.view === 'window'
     ? 'The rear camera is zoomed so it covers the same angle as the window. Its lens is estimated, so the ' +
       'floor behind the coastlines is approximate; the coastlines themselves are exact.'
-    : '';
+    : cam ? 'The far side registers on the rear camera\'s image.' : '';
 }
 
 /* ------------------------------------------- face tracking (front camera) --- */
@@ -1222,12 +1880,15 @@ function applySaved() {
   var v = load('view'); if (v === 'ar' || v === 'window') S.view = v;
   var sc = load('scr'); if (sc && sc.pxPerMm) { S.scr = sc; $('scrSrc').value = sc.src === 'diag' ? 'diag' : 'card'; }
   var cm = load('eyeCm'); if (cm) { S.eye.ez = cm / 100; $('eyeCm').value = cm; }
-  var bg = load('bg'); if (bg === 'black') $('bgSrc').value = 'black';
+  var bg = load('bg2'); S.bg = (bg === 'black' || bg === 'camera') ? bg : 'space';
+  if (load('skyLines') === false) { S.sky.lines = false; $('skyLines').checked = false; }
+  if (load('skyNames') === false) { S.sky.names = false; $('skyNames').checked = false; }
   var lens = load('lens'); if (lens && lens.vfov) S.lens = lens;
   if (S.lens.src === 'estimated' && /Android/i.test(navigator.userAgent || '')) S.lens.vfov = 75;
-  setView(S.view); syncScreenStatus(); syncEyeUi();
+  setView(S.view); syncScreenStatus(); setBg(S.bg); syncClockUi();
 }
 applySaved();
+window.EID = { S: S, sky: sky };     // for the test harness
 
 $('startBtn').addEventListener('click', function () {
   $('startOverlay').classList.add('hidden');
@@ -1249,23 +1910,26 @@ $('startBtn').addEventListener('click', function () {
   }
   requestGeo();
 
+  applyBackground();
+});
+/* The camera runs only when it is the background; otherwise the front camera
+   is free for continuous head tracking in window mode. */
+function applyBackground() {
   stopFace();
+  var cam = S.bg === 'camera';
   var wantFace = S.view === 'window' && $('eyeSrc').value === 'face';
   var canFace = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-  if (S.view === 'ar') {
-    video.style.opacity = $('opacity').value / 100;
-    startCamera();
-  } else if (S.bg === 'camera') {
-    video.style.opacity = $('opacity').value / 100;
+  video.style.opacity = cam ? $('opacity').value / 100 : 0;
+  if (cam) {
     if (wantFace && canFace) measureEyeOnce().then(function () { syncViewUi(); startCamera(); });
     else startCamera();
   } else {
-    if (S.stream) { S.stream.getTracks().forEach(function (t) { t.stop(); }); S.stream = null; }
-    video.style.opacity = 0;
+    if (S.stream) { S.stream.getTracks().forEach(function (t) { t.stop(); }); S.stream = null; video.srcObject = null; }
     if (wantFace && canFace) runFace(true).catch(function () { note('face tracking unavailable; head fixed on the pane axis'); });
+    if (S.bg === 'space' && !sky.ok) note('WebGL unavailable: no star field, black background');
   }
   syncViewUi();
-});
+}
 })();
 </script>
 </body>

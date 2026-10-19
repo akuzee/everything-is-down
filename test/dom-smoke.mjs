@@ -88,6 +88,9 @@ try {
   byId('startBtn').fire('click');        // start: attaches sensors, geo fires synchronously
   check('start flow runs (geo fix applied)', /loc 40\.71/.test(byId('chipLoc').textContent),
     JSON.stringify(byId('chipLoc').textContent));
+  check('space is the default background; without WebGL the app says so',
+    byId('bgSrc').value === 'space' && byId('bgSel').value === 'space' && /WebGL unavailable/.test(byId('note').textContent),
+    JSON.stringify(byId('note').textContent));
 
   // phone flat, top edge north
   (winListeners['deviceorientation'] || []).forEach(fn =>
@@ -106,6 +109,21 @@ try {
     JSON.stringify(byId('roMain').textContent));
   check('HUD nearest place computed', /Perth|km/.test(byId('roSub').textContent),
     JSON.stringify(byId('roSub').textContent));
+  check('sun chip stays quiet without the sky layer', byId('chipSun').textContent === 'sun: –',
+    JSON.stringify(byId('chipSun').textContent));
+
+  // the clock control drives the sky's time
+  byId('clock').value = '6'; byId('clock').fire('input');
+  check('clock offset shows in the panel', /\+6 h/.test(byId('clockVal').textContent) && /UTC/.test(byId('clockInfo').textContent),
+    JSON.stringify(byId('clockVal').textContent));
+  byId('clockNow').fire('click');
+  check('clock reset to now', byId('clockVal').textContent === 'now');
+
+  // switching to the camera background with no camera API degrades to a note
+  byId('bgSel').value = 'camera'; byId('bgSel').fire('change');
+  check('camera background without a camera API notes it', /no camera API/.test(byId('note').textContent),
+    JSON.stringify(byId('note').textContent));
+  byId('bgSel').value = 'space'; byId('bgSel').fire('change');
 
   // tilt 40 deg toward horizon, then run frames: nu should approach 40
   (winListeners['deviceorientation'] || []).forEach(fn =>
@@ -132,7 +150,7 @@ try {
   // self-test button produces all-pass output
   byId('runTest').fire('click');
   const lines = byId('testOut').children.map(c => c.textContent).join('');
-  check('in-app self-test panel: all pass', !/✗/.test(lines) && /\/14|\/13|\/12|passed/.test(lines),
+  check('in-app self-test panel: all pass', !/✗/.test(lines) && /\/22|passed/.test(lines),
     (lines.match(/(\d+\/\d+ passed)/) || [])[1]);
 } catch (e) {
   check('interaction flow runs without throwing', false, String(e && e.stack || e));
